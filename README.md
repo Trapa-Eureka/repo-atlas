@@ -91,10 +91,9 @@ flowchart LR
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, each with `--json`                                                                  | Done    |
 | `atlas mermaid`: file overview or the neighbourhood of one node                                                                                          | Done    |
 | `atlas view`: the graph as one HTML page to explore in a browser, with no server                                                                       | Done    |
-| `atlas mcp`: MCP server (stdio) with six tools; `atlas init` registers it in `.mcp.json`                                                                 | Done    |
+| `atlas mcp`: MCP server (stdio) with six tools; `atlas init` registers it with Claude Code, VS Code, Cursor, Devin (Windsurf) or JetBrains               | Done    |
 | Local SQLite index (built-in `node:sqlite`, nothing to compile)                                                                                          | Done    |
 | Published npm package (`repo-atlas-cli`)                                                                                                                 | Done    |
-| IDE integration                                                                                                                                          | Planned |
 | Paid plans: hosted indexing of private repositories, shared team graph, CI integration                                                                   | Planned |
 
 ### How it works
@@ -153,7 +152,7 @@ You need the build from [Installation](#installation) and the `atlas` alias. The
 1. **Index it.** `cd your-project`, then `atlas index`. This creates `.atlas/` (git-ignored by itself, on your machine only).
 2. **Ask before you edit.** `atlas context src/some/file.ts` shows what the file defines, what it uses, who uses it, the tables and env keys it touches, and the docs that mention it.
 3. **Check the blast radius.** `atlas impact <file | function | table | ENV_KEY>` lists everything that depends on it.
-4. **Give it to your agent.** `atlas init` registers the MCP server in `.mcp.json`; restart the agent. See [Use it from an AI agent](#use-it-from-an-ai-agent).
+4. **Give it to your agent.** `atlas init` registers the MCP server in `.mcp.json` (`--client` picks another agent); restart the agent. See [Use it from an AI agent](#use-it-from-an-ai-agent).
 
 You do not need to re-run `atlas index`: every command first re-parses the files that changed since the last run.
 
@@ -205,15 +204,26 @@ pnpm test:hooks   # tests for the dev-time hooks
 `atlas mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin/stdout. Register it once per repository:
 
 ```bash
-atlas init        # adds "repo-atlas" to .mcp.json, keeping other servers
+atlas init                    # adds "repo-atlas" to .mcp.json, keeping other servers
+atlas init --client cursor    # or: vscode, devin (also as windsurf), jetbrains
 ```
 
-or add it by hand:
+| Agent                  | `--client`          | What `atlas init` does                                                  | Then                                                                                         |
+| ---------------------- | ------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Claude Code            | `claude` (default)  | writes `.mcp.json`                                                      | restart; it asks once whether to trust the server                                            |
+| VS Code (Copilot)      | `vscode`            | writes the same `.mcp.json`                                             | turn on the setting `chat.mcp.workspaceRootConfig.enabled`; check with **MCP: List Servers** |
+| Cursor                 | `cursor`            | writes `.cursor/mcp.json`                                               | turn the server on under **Customize**                                                       |
+| Devin Local (Windsurf) | `devin`, `windsurf` | writes `.devin/mcp_config.json`                                         | open **Customize > MCPs** and refresh                                                        |
+| JetBrains AI Assistant | `jetbrains`         | prints the entry; JetBrains keeps no file for it in the repository      | paste it under **Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add**      |
+
+Each file is the one that product's documentation names for a repository, and it is written in the folder `atlas` works on (the repository root, or `-C`); `atlas init` does not look for settings anywhere else. A file that is not valid JSON is left as it is and reported. Windsurf's documentation now leads to Devin Local, so `windsurf` writes the Devin file. Only the Claude Code setup has been run end to end here; the others follow the documentation as of November 2026 and are checked for the file they write, not inside each editor.
+
+To add the server by hand, this is the entry (`"type": "stdio"` is what VS Code and Cursor ask for; the others do not need it):
 
 ```json
 {
   "mcpServers": {
-    "repo-atlas": { "command": "atlas", "args": ["mcp"] }
+    "repo-atlas": { "type": "stdio", "command": "atlas", "args": ["mcp"] }
   }
 }
 ```
@@ -312,7 +322,7 @@ TypeScript (ESM) on Node.js 22+ · [web-tree-sitter](https://github.com/tree-sit
 - [x] **Phase 2**: graph: linking, SQLite store, incremental indexing
 - [x] **Phase 3**: queries and CLI: `search`, `context`, `impact`, `path`, `mermaid`, `stats`, `export`
 - [x] **Phase 4**: agents: MCP server, `atlas init`
-- [ ] **Phase 5**: release
+- [x] **Phase 5**: release
   - [x] npm package ([`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli))
   - [x] more languages
     - [x] Go
@@ -320,7 +330,7 @@ TypeScript (ESM) on Node.js 22+ · [web-tree-sitter](https://github.com/tree-sit
     - [x] Rust
     - [x] Ruby
   - [x] local HTML viewer (`atlas view`)
-  - [ ] IDE integration
+  - [x] setup for the agents inside editors (`atlas init --client`): VS Code, Cursor, Devin (Windsurf), JetBrains
 - [ ] **Phase 6**: paid plans: hosted private-repository indexing, shared team graph, CI integration (planned)
 
 ## Contributing

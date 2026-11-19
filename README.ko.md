@@ -93,10 +93,9 @@ flowchart LR
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, 모두 `--json` 지원 | 완료 |
 | `atlas mermaid`: 파일 단위 전체 그림 또는 노드 하나의 주변 | 완료 |
 | `atlas view`: 그래프를 브라우저에서 탐색하는 HTML 페이지 하나로 저장 (서버 없음) | 완료 |
-| `atlas mcp`: 도구 6개를 가진 MCP 서버(stdio). `atlas init`이 `.mcp.json`에 등록 | 완료 |
+| `atlas mcp`: 도구 6개를 가진 MCP 서버(stdio). `atlas init`이 Claude Code, VS Code, Cursor, Devin(Windsurf), JetBrains에 등록 | 완료 |
 | 로컬 SQLite 인덱스(내장 `node:sqlite`, 컴파일할 것 없음) | 완료 |
 | npm 패키지 배포 (`repo-atlas-cli`) | 완료 |
-| IDE 연동 | 예정 |
 | 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 | 계획중 |
 
 ### 동작 방식
@@ -155,7 +154,7 @@ alias atlas='node /path/to/repo-atlas/dist/cli/main.js'   # 경로는 맞게 바
 1. **인덱싱합니다.** `cd your-project` 후 `atlas index`. `.atlas/` 폴더가 생깁니다(스스로 git에서 제외되며 내 컴퓨터에만 있습니다).
 2. **고치기 전에 물어봅니다.** `atlas context src/some/file.ts`는 그 파일이 무엇을 정의하고 쓰는지, 누가 쓰는지, 어떤 테이블과 환경변수 키를 건드리는지, 어떤 문서가 언급하는지 보여 줍니다.
 3. **영향 범위를 확인합니다.** `atlas impact <파일 | 함수 | 테이블 | ENV_KEY>`는 거기에 의존하는 모든 것을 나열합니다.
-4. **에이전트에게 줍니다.** `atlas init`이 MCP 서버를 `.mcp.json`에 등록합니다. 에이전트를 다시 시작하세요. [AI 에이전트에서 쓰기](#ai-에이전트에서-쓰기)를 보세요.
+4. **에이전트에게 줍니다.** `atlas init`이 MCP 서버를 `.mcp.json`에 등록합니다(`--client`로 다른 에이전트를 고릅니다). 에이전트를 다시 시작하세요. [AI 에이전트에서 쓰기](#ai-에이전트에서-쓰기)를 보세요.
 
 `atlas index`를 다시 실행할 필요는 없습니다. 모든 명령이 먼저 지난 실행 이후 바뀐 파일을 다시 파싱합니다.
 
@@ -207,15 +206,26 @@ pnpm test:hooks   # 개발용 훅 테스트
 `atlas mcp`는 stdin/stdout으로 [Model Context Protocol](https://modelcontextprotocol.io) 서버를 실행합니다. 저장소마다 한 번 등록합니다.
 
 ```bash
-atlas init        # .mcp.json에 "repo-atlas"를 추가하고 다른 서버는 그대로 둡니다
+atlas init                    # .mcp.json에 "repo-atlas"를 추가하고 다른 서버는 그대로 둡니다
+atlas init --client cursor    # 또는 vscode, devin(windsurf로 적어도 됨), jetbrains
 ```
 
-직접 적어도 됩니다.
+| 에이전트 | `--client` | `atlas init`이 하는 일 | 그다음 |
+|---|---|---|---|
+| Claude Code | `claude` (기본값) | `.mcp.json`에 씁니다 | 다시 시작하면 서버를 신뢰할지 한 번 묻습니다 |
+| VS Code (Copilot) | `vscode` | 같은 `.mcp.json`에 씁니다 | 설정 `chat.mcp.workspaceRootConfig.enabled`를 켜고 **MCP: List Servers**로 확인합니다 |
+| Cursor | `cursor` | `.cursor/mcp.json`에 씁니다 | **Customize**에서 서버를 켭니다 |
+| Devin Local (Windsurf) | `devin`, `windsurf` | `.devin/mcp_config.json`에 씁니다 | **Customize > MCPs**를 열고 새로 고칩니다 |
+| JetBrains AI Assistant | `jetbrains` | 항목을 출력합니다. JetBrains는 저장소 안에 이 설정 파일을 두지 않습니다 | **Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add**에 붙여 넣습니다 |
+
+각 파일은 그 제품의 문서가 저장소용으로 안내하는 파일이며, `atlas`가 작업하는 폴더(저장소 루트 또는 `-C`)에 씁니다. `atlas init`은 그 밖의 위치에서 설정을 찾지 않습니다. 올바른 JSON이 아닌 파일은 그대로 두고 알려 줍니다. Windsurf 문서는 이제 Devin Local로 이어지므로 `windsurf`는 Devin 파일에 씁니다. 처음부터 끝까지 실행해 본 것은 Claude Code 설정뿐입니다. 나머지는 2026년 11월 기준 문서를 따랐고, 어떤 파일을 쓰는지만 확인했으며 각 에디터 안에서 확인하지는 않았습니다.
+
+직접 추가하려면 아래 항목을 적습니다(`"type": "stdio"`는 VS Code와 Cursor가 요구하는 값이고, 나머지는 없어도 됩니다).
 
 ```json
 {
   "mcpServers": {
-    "repo-atlas": { "command": "atlas", "args": ["mcp"] }
+    "repo-atlas": { "type": "stdio", "command": "atlas", "args": ["mcp"] }
   }
 }
 ```
@@ -314,7 +324,7 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
 - [x] **Phase 2**: 그래프: 연결, SQLite 저장소, 증분 인덱싱
 - [x] **Phase 3**: 질의와 CLI: `search`, `context`, `impact`, `path`, `mermaid`, `stats`, `export`
 - [x] **Phase 4**: 에이전트: MCP 서버, `atlas init`
-- [ ] **Phase 5**: 릴리스
+- [x] **Phase 5**: 릴리스
   - [x] npm 패키지 ([`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli))
   - [x] 언어 추가
     - [x] Go
@@ -322,7 +332,7 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
     - [x] Rust
     - [x] Ruby
   - [x] 로컬 HTML 뷰어 (`atlas view`)
-  - [ ] IDE 연동
+  - [x] 에디터 안의 에이전트용 설정 (`atlas init --client`): VS Code, Cursor, Devin(Windsurf), JetBrains
 - [ ] **Phase 6**: 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 (계획중)
 
 ## 기여

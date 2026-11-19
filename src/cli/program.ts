@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { Command, InvalidArgumentError } from "commander";
 import { Atlas, findRoot } from "../app/atlas.js";
 import { NODE_KINDS, type NodeKind } from "../graph/types.js";
@@ -24,6 +24,47 @@ function positiveInteger(value: string): number {
 function nodeKind(value: string): NodeKind {
   if (!(NODE_KINDS as readonly string[]).includes(value)) throw new InvalidArgumentError(`Expected one of: ${NODE_KINDS.join(", ")}.`);
   return value as NodeKind;
+}
+
+/**
+ * Where each agent reads the MCP servers of one repository, and what it needs to be told about a
+ * local command. Taken from each product's own documentation; `file: null` means it keeps no file
+ * in the repository and the entry is pasted into its settings.
+ */
+const CLIENTS = {
+  claude: { file: ".mcp.json", typed: true, next: "Restart Claude Code. It asks once whether to trust the new server." },
+  vscode: {
+    file: ".mcp.json",
+    typed: true,
+    next: 'VS Code reads this file when the setting "chat.mcp.workspaceRootConfig.enabled" is on. Check with "MCP: List Servers" in the Command Palette.',
+  },
+  cursor: { file: ".cursor/mcp.json", typed: true, next: "Turn the server on under Customize in Cursor's sidebar." },
+  devin: { file: ".devin/mcp_config.json", typed: false, next: "Open Customize > MCPs in Devin Desktop (where Windsurf's documentation now leads) and refresh the list." },
+  jetbrains: { file: null, typed: false, next: "Paste this under Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add, then Apply." },
+} as const;
+
+type Client = keyof typeof CLIENTS;
+
+function client(value: string): Client {
+  const name = value === "windsurf" ? "devin" : value;
+  if (!Object.hasOwn(CLIENTS, name)) throw new InvalidArgumentError(`Expected one of: ${Object.keys(CLIENTS).join(", ")}.`);
+  return name as Client;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The servers an agent's config file already lists, with the rest of the file. A file that cannot be added to is refused, never rewritten. */
+function readServers(path: string): { config: Record<string, unknown>; servers: Record<string, unknown> } {
+  if (!existsSync(path)) return { config: {}, servers: {} };
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    throw new Error(`${path} is not valid JSON. Fix it, or add the server by hand.`);
+  }
+  const servers = isRecord(config) ? (config.mcpServers ?? {}) : null;
+  if (!isRecord(config) || !isRecord(servers)) throw new Error(`${path} does not hold an object of "mcpServers". Add the server by hand.`);
+  return { config, servers };
 }
 
 function print(text: string): void {
@@ -199,14 +240,25 @@ export function buildProgram(): Command {
 
   program
     .command("init")
-    .description("register the MCP server for this repository in .mcp.json, so coding agents can query the graph")
-    .action(() => {
+    .description("register the MCP server for this repository with a coding agent (default: .mcp.json, read by Claude Code and VS Code)")
+    .option("--client <name>", `agent to register with: ${Object.keys(CLIENTS).join(", ")} (windsurf means devin)`, client, "claude")
+    .action((options: { client: Client }) => {
+      const { file, typed, next } = CLIENTS[options.client];
+      const server = { ...(typed ? { type: "stdio" } : {}), command: "atlas", args: ["mcp"] };
+      const entry = { mcpServers: { "repo-atlas": server } };
+      if (file === null) {
+        output({ client: options.client, file: null, ...entry }, () => JSON.stringify(entry, null, 2));
+        if (!globals().json) note(next);
+        return;
+      }
       const root = rootOf();
-      const file = join(root, ".mcp.json");
-      const config = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as { mcpServers?: Record<string, unknown> }) : {};
-      config.mcpServers = { ...config.mcpServers, "repo-atlas": { command: "atlas", args: ["mcp"] } };
-      writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
-      print(`Added the "repo-atlas" server to ${file}\nRestart your agent (Claude Code asks once whether to trust the new server).`);
+      if (!existsSync(root)) throw new Error(`Folder not found: ${root}`);
+      const path = join(root, file);
+      const { config, servers } = readServers(path);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `${JSON.stringify({ ...config, mcpServers: { ...servers, ...entry.mcpServers } }, null, 2)}\n`);
+      output({ client: options.client, file: path, ...entry }, () => `Added the "repo-atlas" server to ${path}`);
+      if (!globals().json) note(next);
     });
 
   program

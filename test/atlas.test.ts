@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -199,10 +199,62 @@ describe("CLI", () => {
 
   it("registers the MCP server without dropping existing entries", async () => {
     writeFileSync(join(root, ".mcp.json"), JSON.stringify({ mcpServers: { other: { command: "x" } } }));
-    expect((await atlas("init")).code).toBe(0);
+    const result = await atlas("init");
+    expect(result.code).toBe(0);
+    expect(result.out).toBe(`Added the "repo-atlas" server to ${join(root, ".mcp.json")}\n`);
     expect(JSON.parse(readFileSync(join(root, ".mcp.json"), "utf8"))).toEqual({
-      mcpServers: { other: { command: "x" }, "repo-atlas": { command: "atlas", args: ["mcp"] } },
+      mcpServers: { other: { command: "x" }, "repo-atlas": { type: "stdio", command: "atlas", args: ["mcp"] } },
     });
+  });
+
+  it("registers with other agents where each one keeps its servers", async () => {
+    const read = (file: string) => JSON.parse(readFileSync(join(root, file), "utf8")) as { mcpServers: Record<string, unknown> };
+    mkdirSync(join(root, ".cursor"));
+    writeFileSync(join(root, ".cursor/mcp.json"), JSON.stringify({ inputs: [1], mcpServers: { other: { command: "x" }, "repo-atlas": { command: "old" } } }));
+    expect((await atlas("init", "--client", "cursor")).code).toBe(0);
+    expect(read(".cursor/mcp.json")).toEqual({ inputs: [1], mcpServers: { other: { command: "x" }, "repo-atlas": { type: "stdio", command: "atlas", args: ["mcp"] } } });
+
+    expect((await atlas("init", "--client", "devin")).err).toContain("Devin Desktop");
+    expect(read(".devin/mcp_config.json").mcpServers["repo-atlas"]).toEqual({ command: "atlas", args: ["mcp"] });
+    rmSync(join(root, ".devin"), { recursive: true });
+    expect((await atlas("init", "--client", "windsurf")).code).toBe(0);
+    expect(read(".devin/mcp_config.json").mcpServers["repo-atlas"]).toEqual({ command: "atlas", args: ["mcp"] });
+
+    const vscode = await atlas("init", "--client", "vscode");
+    expect(vscode.err).toContain("chat.mcp.workspaceRootConfig.enabled");
+    expect(read(".mcp.json").mcpServers["repo-atlas"]).toEqual({ type: "stdio", command: "atlas", args: ["mcp"] });
+
+    const asJson = await atlas("--json", "init", "--client", "cursor");
+    expect(JSON.parse(asJson.out)).toMatchObject({ client: "cursor", file: join(root, ".cursor/mcp.json") });
+    expect(asJson.err).toBe("");
+  });
+
+  it("prints the entry for JetBrains, which keeps no file in the repository", async () => {
+    const before = readdirSync(root, { recursive: true }).length;
+    const pasted = await atlas("init", "--client", "jetbrains");
+    expect(JSON.parse(pasted.out)).toEqual({ mcpServers: { "repo-atlas": { command: "atlas", args: ["mcp"] } } });
+    expect(pasted.err).toContain("Model Context Protocol");
+    expect(readdirSync(root, { recursive: true }).length).toBe(before);
+  });
+
+  it("refuses a config file it cannot add to, and leaves it as it was", async () => {
+    for (const content of ["[1, 2]", '{"mcpServers": [1]}', '{"mcpServers": "abc"}', "null", "{ // comment\n}", ""]) {
+      writeFileSync(join(root, ".mcp.json"), content);
+      const result = await atlas("init");
+      expect(result.code, content).toBe(1);
+      expect(result.out).toBe("");
+      expect(result.err).toContain(join(root, ".mcp.json"));
+      expect(readFileSync(join(root, ".mcp.json"), "utf8")).toBe(content);
+    }
+    writeFileSync(join(root, ".mcp.json"), '\uFEFF{"mcpServers": null}');
+    expect((await atlas("init")).code).toBe(0);
+  });
+
+  it("does not create the folder it was pointed at", async () => {
+    const missing = join(root, "no", "such");
+    const result = await run(["node", "atlas", "--root", missing, "init", "--client", "cursor"]).catch(() => 1);
+    expect(result).toBe(1);
+    expect(existsSync(missing)).toBe(false);
   });
 });
 
