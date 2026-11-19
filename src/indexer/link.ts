@@ -483,6 +483,7 @@ class Linker {
   /** What a Java call gives: the class made by `new T()`, or the class the method called says it returns, in the terms of the file that declares the method. */
   private javaReturned(facts: FileFacts, call: CallRef, depth: number): Declared | null {
     if (depth >= MAX_CALL_DEPTH) return null;
+    if (call.receiver === "extends") return null;
     if (call.receiver === "new") return this.javaType(facts, call.callee, this.javaOwner(facts, call.line)?.symbol.name ?? null);
     const id = this.javaCall(facts, call, depth + 1);
     const path = id ? id.slice(4, id.indexOf("#")) : null;
@@ -515,8 +516,10 @@ class Linker {
     const within = owner?.symbol.name ?? null;
     // `a.open().read()`, `new T().run()`: a method of whatever the inner call gives.
     if (call.receiver === "()") return call.via ? this.javaMethod(this.javaReturned(facts, call.via, depth), call.callee) : null;
-    if (call.receiver === "new") {
-      const type = this.javaType(facts, call.callee, within);
+    if (call.receiver === "new" || call.receiver === "extends") {
+      // `super(...)` builds the parent, which is named where the class's own members are not in view.
+      const around = call.receiver === "extends" && within ? (within.includes(".") ? within.slice(0, within.lastIndexOf(".")) : null) : within;
+      const type = this.javaType(facts, call.callee, around);
       return type ? symbolId(type.facts.path, type.symbol.name) : null;
     }
     if (call.receiver === null || call.receiver === "this") {
@@ -564,6 +567,9 @@ class Linker {
       }
     }
     for (const use of facts.uses ?? []) {
+      // `MAX.length`, `Limits.MAX`: a variable or a statically imported constant of that name comes before a class.
+      const first = use.name.split(".")[0] ?? use.name;
+      if (use.maybe && (this.local(facts, first, use.line) || facts.imports.some((fact) => fact.static && !fact.star && fact.names[0]?.local === first))) continue;
       const declared = this.javaType(facts, use.name, this.javaOwner(facts, use.line)?.symbol.name ?? null);
       if (declared && declared.facts.path !== facts.path) this.edge(from, fileId(declared.facts.path), "imports", use.line);
     }

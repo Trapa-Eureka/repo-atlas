@@ -99,7 +99,7 @@ export interface CallRef {
 export interface CallFact {
   callee: string;
   /**
-   * `obj` in `obj.callee()`, `this` / `self` / `super`, `this.field` in `this.field.callee()`, `new` for `new Callee()` in Java,
+   * `obj` in `obj.callee()`, `this` / `self` / `super`, `this.field` in `this.field.callee()`, `new` for `new Callee()` in Java (`extends` for `super(...)`, which builds the parent `Callee`),
    * a Rust path ending in `::` for `a::b::callee()`, or in Ruby `@field`, a constant (`A::B`) or `A::B.new` for a call on a fresh instance.
    */
   receiver: string | null;
@@ -143,7 +143,7 @@ export interface FileFacts {
    * Java: the type names the file mentions, with the line of the first mention. A class of the same package is used without an import.
    * Ruby: the constants the file mentions, once per namespace. A class is used without naming its file anywhere.
    */
-  uses?: { name: string; line: number; /** Ruby: the parent in `class A < B`, which is looked up from outside the class that starts on that line. */ outside?: boolean }[];
+  uses?: { name: string; line: number; /** Ruby: the parent in `class A < B`, which is looked up from outside the class that starts on that line. */ outside?: boolean; /** Java: the name stands where a variable could stand too; it is a class only if no variable of that name is in view. */ maybe?: boolean }[];
   /** Ruby: the lines of each class and module body, with the full names of the namespaces around it, innermost first. A constant is looked up in each in turn. */
   namespaces?: { names: string[]; line: number; endLine: number }[];
   symbols: SymbolFact[];

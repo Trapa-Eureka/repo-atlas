@@ -744,6 +744,8 @@ interface JavaScope {
   anonymous?: boolean;
   /** The type parameters of the classes around (`Item` in `class Box<Item>`): names that are not classes. */
   generics?: Set<string>;
+  /** The class the one being walked extends, as written: what `super(...)` in a constructor builds. */
+  parent?: string | null;
 }
 
 /** The names a `<..>` list on a class or a method declares. */
@@ -811,10 +813,17 @@ function javaDeclared(name: Node | null, type: Node | null, value: Node | null, 
   else facts.locals.push({ name: name.text, kind: "other", ...range });
 }
 
-function javaUse(name: string, node: Node, facts: FileFacts): void {
+/**
+ * Notes a class name the file mentions. With `maybe`, the name stands where a variable could
+ * stand too (`MAX.length`, `Limits.MAX`): it counts as a class only if nothing of that name is
+ * declared there, which the linker checks. A mention as a type settles it.
+ */
+function javaUse(name: string, node: Node, facts: FileFacts, maybe = false): void {
   if (/^[A-Z]$/.test(name)) return;
   const uses = (facts.uses ??= []);
-  if (!uses.some((use) => use.name === name)) uses.push({ name, line: line(node) });
+  const seen = uses.find((use) => use.name === name);
+  if (!seen) uses.push({ name, line: line(node), ...(maybe ? { maybe } : {}) });
+  else if (!maybe) delete seen.maybe;
 }
 
 const JAVA_SCOPES = new Set(["block", "constructor_body", "method_declaration", "constructor_declaration", "lambda_expression", "switch_block_statement_group", "switch_rule"]);
@@ -863,7 +872,7 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
         if (table?.type === "string_literal") facts.tables.push({ name: unquote(table.text).toLowerCase(), op: "define", line: line(annotation) });
       }
 
-      const inside: JavaScope = { owner: qualified, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node), generics: javaGenerics(node, new Set(scope.generics)) };
+      const inside: JavaScope = { owner: qualified, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node), generics: javaGenerics(node, new Set(scope.generics)), parent: symbol.extends ?? null };
       // The components of a record are its fields.
       for (const component of namedChildren(node.childForFieldName("parameters") ?? node).filter((child) => child.type === "formal_parameter")) {
         const range = { line: line(node), endLine: endLine(node), column: column(node) };
@@ -928,12 +937,25 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
       if (call) facts.calls.push(call);
       // `Labels.format()`: a capitalised receiver may be a class that is used without being imported.
       const object = node.childForFieldName("object");
-      if (object?.type === "identifier" && /^[A-Z]/.test(object.text)) javaUse(object.text, object, facts);
+      if (object?.type === "identifier" && /^[A-Z]/.test(object.text)) javaUse(object.text, object, facts, true);
       break;
     }
     case "object_creation_expression": {
       const call = javaCallRef(node, scope);
       if (call) facts.calls.push(call);
+      break;
+    }
+    case "explicit_constructor_invocation":
+      // `super(...)` in a constructor runs the parent's constructor: a use of the parent class, as `new Parent(...)` is.
+      if (node.childForFieldName("constructor")?.type === "super" && scope.parent && !scope.anonymous) {
+        // The parent is named outside the class body, where the classes declared in the body are not in view: `extends`.
+        facts.calls.push({ callee: scope.parent, receiver: "extends", line: line(node), column: column(node) });
+      }
+      break;
+    case "field_access": {
+      // `Limits.MAX`, `Outer.Inner.MAX`: a capitalised name at the start may be a class of the package, used without an import.
+      const object = node.childForFieldName("object");
+      if (object?.type === "identifier" && /^[A-Z]/.test(object.text)) javaUse(object.text, object, facts, true);
       break;
     }
     case "annotation":

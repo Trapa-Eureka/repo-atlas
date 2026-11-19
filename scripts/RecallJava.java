@@ -155,6 +155,10 @@ public class RecallJava {
           default -> "chained a.b().c()";
         };
       }
+      if ((written.equals("this") || written.equals("super")) && !isWritten(node, written)) {
+        // javac puts `super();` into every constructor that does not start with one: nobody wrote that call.
+        return super.visitMethodInvocation(node, unused);
+      }
       if (!(target instanceof ExecutableElement method)) {
         unresolved++;
       } else if (written.equals("this") || written.equals("super")) {
@@ -163,6 +167,17 @@ public class RecallJava {
         call(method, method.getEnclosingElement(), method.getSimpleName().toString(), form, node);
       }
       return super.visitMethodInvocation(node, unused);
+    }
+
+    /** Whether the source has `word` where the tree says the call starts. */
+    boolean isWritten(Tree tree, String word) {
+      try {
+        int start = (int) trees.getSourcePositions().getStartPosition(unit, tree);
+        CharSequence source = unit.getSourceFile().getCharContent(true);
+        return start >= 0 && start + word.length() <= source.length() && source.subSequence(start, start + word.length()).toString().equals(word);
+      } catch (java.io.IOException failure) {
+        return true;
+      }
     }
 
     Element elementOf2(Tree parent, Tree child) {

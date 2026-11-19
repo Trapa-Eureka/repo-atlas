@@ -501,6 +501,38 @@ describe("Java", () => {
       "b/App.java#App.run -> a/Sub.java#Sub.sub",
     ]);
   });
+  it("takes super(...) for a use of the parent class, and a class named only for a constant for a class the file depends on", async () => {
+    const files = {
+      "src/com/acme/Base.java": "package com.acme;\n\npublic class Base {\n    public Base(int size) {}\n}\n",
+      "src/com/acme/Limits.java": "package com.acme;\n\npublic class Limits {\n    public static final int MAX = 3;\n\n    public static class Deep {\n        public static final int MIN = 1;\n    }\n}\n",
+      "src/com/acme/Other.java": "package com.acme;\n\npublic class Other {\n    public static final int ZERO = 0;\n}\n",
+      "src/com/acme/Shop.java":
+        "package com.acme;\n\npublic class Shop extends Base {\n    private final Object lower = new Object();\n\n    public Shop() {\n        super(Limits.MAX);\n    }\n\n    public Shop(int size) {\n        this();\n    }\n\n    int smallest() {\n        return Limits.Deep.MIN + lower.hashCode();\n    }\n}\n",
+      "src/com/acme/Plain.java": "package com.acme;\n\npublic class Plain {\n    public Plain() {\n        super();\n    }\n}\n",
+    };
+    expect(await edgesOf("calls", files)).toEqual(["src/com/acme/Shop.java#Shop -> src/com/acme/Base.java#Base"]);
+    expect(await edgesOf("imports", files)).toEqual(["src/com/acme/Shop.java -> src/com/acme/Base.java", "src/com/acme/Shop.java -> src/com/acme/Limits.java"]);
+
+    // `this(...)` builds nothing new, and a class declared in the body does not hide the parent named before the body.
+    const shadowed = {
+      "p/Base.java": "package p;\n\npublic class Base {\n    public Base(int n) {}\n}\n",
+      "p/Again.java": "package p;\n\npublic class Again extends Base {\n    Again() {\n        this(1);\n    }\n\n    Again(int n) {\n        super(n);\n    }\n\n    static class Base {}\n}\n",
+      "p/Only.java": "package p;\n\npublic class Only extends Base {\n    Only() {\n        this(1);\n    }\n\n    Only(int n) {\n        this();\n    }\n}\n",
+    };
+    expect(await edgesOf("calls", shadowed)).toEqual(["p/Again.java#Again -> p/Base.java#Base"]);
+
+    // A field, a parameter, a local or a statically imported constant written in capitals is not the class of that name.
+    const variables = {
+      "q/MAX.java": "package q;\n\npublic class MAX {}\n",
+      "q/RED.java": "package q;\n\npublic class RED {}\n",
+      "q/ARR.java": "package q;\n\npublic class ARR {}\n",
+      "q/Deep.java": "package q;\n\npublic class Deep {\n    public static final int MIN = 1;\n}\n",
+      "lib/Limits.java": "package lib;\n\npublic class Limits {\n    public static final int[] ARR = {};\n}\n",
+      "q/Use.java":
+        "package q;\n\nimport static lib.Limits.ARR;\n\npublic class Use {\n    static final int[] MAX = {};\n\n    int a(int[] RED) {\n        return MAX.length + RED.length + ARR.length + Deep.MIN;\n    }\n}\n",
+    };
+    expect(await edgesOf("imports", variables)).toEqual(["q/Use.java -> lib/Limits.java", "q/Use.java -> q/Deep.java"]);
+  });
 });
 
 describe("a name declared inside a case clause", () => {
