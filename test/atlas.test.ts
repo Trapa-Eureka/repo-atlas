@@ -221,13 +221,26 @@ describe("CLI", () => {
     expect((await atlas("init", "--client", "windsurf")).code).toBe(0);
     expect(read(".devin/mcp_config.json").mcpServers["repo-atlas"]).toEqual({ command: "atlas", args: ["mcp"] });
 
+    // VS Code keeps its own file, with its own name for the list, and other servers in it stay.
+    mkdirSync(join(root, ".vscode"));
+    writeFileSync(join(root, ".vscode/mcp.json"), JSON.stringify({ inputs: [], servers: { other: { command: "x" } } }));
     const vscode = await atlas("init", "--client", "vscode");
-    expect(vscode.err).toContain("chat.mcp.workspaceRootConfig.enabled");
-    expect(read(".mcp.json").mcpServers["repo-atlas"]).toEqual({ type: "stdio", command: "atlas", args: ["mcp"] });
+    expect(vscode.err).toContain("MCP: List Servers");
+    expect(JSON.parse(readFileSync(join(root, ".vscode/mcp.json"), "utf8"))).toEqual({ inputs: [], servers: { other: { command: "x" }, "repo-atlas": { type: "stdio", command: "atlas", args: ["mcp"] } } });
+    expect(existsSync(join(root, ".mcp.json"))).toBe(false);
 
     const asJson = await atlas("--json", "init", "--client", "cursor");
-    expect(JSON.parse(asJson.out)).toMatchObject({ client: "cursor", file: join(root, ".cursor/mcp.json") });
+    expect(JSON.parse(asJson.out)).toEqual({ client: "cursor", file: join(root, ".cursor/mcp.json"), mcpServers: { "repo-atlas": { type: "stdio", command: "atlas", args: ["mcp"] } } });
     expect(asJson.err).toBe("");
+    // The entry is printed under the name the agent's file uses for its list.
+    expect(JSON.parse((await atlas("--json", "init", "--client", "vscode")).out)).toEqual({ client: "vscode", file: join(root, ".vscode/mcp.json"), servers: { "repo-atlas": { type: "stdio", command: "atlas", args: ["mcp"] } } });
+
+    // A list that is not an object is refused under its own name, and the file is left as it was.
+    writeFileSync(join(root, ".vscode/mcp.json"), '{"servers": [1]}');
+    const refused = await atlas("init", "--client", "vscode");
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain('"servers"');
+    expect(readFileSync(join(root, ".vscode/mcp.json"), "utf8")).toBe('{"servers": [1]}');
   });
 
   it("prints the entry for JetBrains, which keeps no file in the repository", async () => {

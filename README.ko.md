@@ -213,14 +213,14 @@ atlas init --client cursor    # 또는 vscode, devin(windsurf로 적어도 됨),
 | 에이전트 | `--client` | `atlas init`이 하는 일 | 그다음 |
 |---|---|---|---|
 | Claude Code | `claude` (기본값) | `.mcp.json`에 씁니다 | 다시 시작하면 서버를 신뢰할지 한 번 묻습니다 |
-| VS Code (Copilot) | `vscode` | 같은 `.mcp.json`에 씁니다 | 설정 `chat.mcp.workspaceRootConfig.enabled`를 켜고 **MCP: List Servers**로 확인합니다 |
-| Cursor | `cursor` | `.cursor/mcp.json`에 씁니다 | **Customize**에서 서버를 켭니다 |
+| VS Code (Copilot) | `vscode` | `.vscode/mcp.json`에 씁니다(VS Code 자체 파일이며 목록 이름이 `servers`입니다) | **MCP: List Servers**를 실행해 서버를 시작하면 신뢰할지 한 번 묻습니다 |
+| Cursor | `cursor` | `.cursor/mcp.json`에 씁니다 | **Customize**에서 서버를 켜거나 `cursor-agent mcp enable repo-atlas`를 실행합니다 |
 | Devin Local (Windsurf) | `devin`, `windsurf` | `.devin/mcp_config.json`에 씁니다 | **Customize > MCPs**를 열고 새로 고칩니다 |
 | JetBrains AI Assistant | `jetbrains` | 항목을 출력합니다. JetBrains는 저장소 안에 이 설정 파일을 두지 않습니다 | **Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add**에 붙여 넣습니다 |
 
-각 파일은 그 제품의 문서가 저장소용으로 안내하는 파일이며, `atlas`가 작업하는 폴더(저장소 루트 또는 `-C`)에 씁니다. `atlas init`은 그 밖의 위치에서 설정을 찾지 않습니다. 올바른 JSON이 아닌 파일은 그대로 두고 알려 줍니다. Windsurf 문서는 이제 Devin Local로 이어지므로 `windsurf`는 Devin 파일에 씁니다. 처음부터 끝까지 실행해 본 것은 Claude Code 설정뿐입니다. 나머지는 2026년 11월 기준 문서를 따랐고, 어떤 파일을 쓰는지만 확인했으며 각 에디터 안에서 확인하지는 않았습니다.
+각 파일은 그 제품의 문서가 저장소용으로 안내하는 파일이며, `atlas`가 작업하는 폴더(저장소 루트 또는 `-C`)에 씁니다. `atlas init`은 그 밖의 위치에서 설정을 찾지 않습니다. 올바른 JSON이 아닌 파일은 그대로 두고 알려 줍니다. Windsurf 문서는 이제 Devin Local로 이어지므로 `windsurf`는 Devin 파일에 씁니다. 처음부터 끝까지 실행해 본 것은 Claude Code, 그리고 명령줄 에이전트를 통한 Cursor입니다(3.26, 서버를 승인한 뒤 `cursor-agent mcp list-tools repo-atlas`가 도구 6개를 보여 줍니다). VS Code는 설치본(1.109)과 대조해 확인했습니다. 그 버전은 `.vscode/mcp.json`만 읽고 저장소 루트의 파일은 읽지 않으므로 `vscode`는 거기에 씁니다. VS Code 문서에 따르면 더 새로운 버전은 설정 `chat.mcp.workspaceRootConfig.enabled`를 켜면 `atlas init`이 쓰는 `.mcp.json`도 읽을 수 있습니다. 이 부분은 여기서 확인하지 않았습니다. 주석이 들어 있는 `.vscode/mcp.json`은 `atlas init`에게는 올바른 JSON이 아니어서, 그대로 두고 그렇다고 알려 줍니다. VS Code 안에서 서버를 실제로 띄워 보지는 않았고, Devin과 JetBrains는 2026년 11월 기준 문서를 따랐을 뿐 실행해 보지 않았습니다.
 
-직접 추가하려면 아래 항목을 적습니다(`"type": "stdio"`는 VS Code와 Cursor가 요구하는 값이고, 나머지는 없어도 됩니다).
+직접 추가하려면 아래 항목을 적습니다(`"type": "stdio"`는 VS Code와 Cursor가 요구하는 값이고, 나머지는 없어도 됩니다. `.vscode/mcp.json`에서는 바깥 이름이 `mcpServers`가 아니라 `servers`입니다).
 
 ```json
 {
