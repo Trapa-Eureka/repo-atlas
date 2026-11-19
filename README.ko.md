@@ -40,7 +40,12 @@ Repo Atlas는 이런 관계를 질의할 수 있는 그래프 하나에 모아 �
 
 <img src="assets/impact.png" alt="터미널: users 테이블에 대한 atlas impact가 거리별로 묶여 나오고, web/App.tsx에서 users 테이블까지의 atlas path가 나온다" width="720">
 
-**함수 하나의 주변을 다이어그램으로** (`atlas mermaid --focus findUser`). GitHub이 바로 렌더링합니다.
+**함수 하나의 주변을 다이어그램으로** (`atlas mermaid --focus findUser`). 이 명령은 Mermaid 플로차트를 출력하고, GitHub·GitLab과 대부분의 에디터가 이를 그림으로 보여 줍니다. 아래는 그 출력을 그린 것입니다.
+
+<img src="assets/mermaid.png" alt="다이어그램: 가운데에 findUser. docs/architecture.md가 문서화하고, src/users/repo.ts가 정의하고, handleOrder·OrderService.place·OrderList가 호출하며, findUser는 query를 호출한다" width="720">
+
+<details>
+<summary>명령의 Mermaid 출력</summary>
 
 ```mermaid
 flowchart LR
@@ -59,6 +64,8 @@ flowchart LR
   n6 -->|calls| n5
   style n5 stroke-width:3px
 ```
+
+</details>
 
 **같은 그래프를 코딩 에이전트에게** (Phase 4). Model Context Protocol로 제공합니다.
 

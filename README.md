@@ -38,7 +38,12 @@ Every picture below is real output, captured from `fixtures/shop`, the small sam
 
 <img src="assets/impact.png" alt="Terminal: atlas impact for the users table grouped by distance, and atlas path from web/App.tsx to the users table" width="720">
 
-**The neighbourhood of one function as a diagram** (`atlas mermaid --focus findUser`), which GitHub renders directly:
+**The neighbourhood of one function as a diagram** (`atlas mermaid --focus findUser`). The command prints a Mermaid flowchart, which GitHub, GitLab and most editors render; this is that output, drawn:
+
+<img src="assets/mermaid.png" alt="Diagram: findUser in the middle; docs/architecture.md documents it, src/users/repo.ts defines it, handleOrder, OrderService.place and OrderList call it, and it calls query" width="720">
+
+<details>
+<summary>The Mermaid output of the command</summary>
 
 ```mermaid
 flowchart LR
@@ -57,6 +62,8 @@ flowchart LR
   n6 -->|calls| n5
   style n5 stroke-width:3px
 ```
+
+</details>
 
 **The same graph for a coding agent** (Phase 4), over the Model Context Protocol:
 
