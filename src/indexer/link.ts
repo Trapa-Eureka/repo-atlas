@@ -480,9 +480,41 @@ class Linker {
     return best ? { facts, symbol: best } : null;
   }
 
-  private javaCall(facts: FileFacts, call: FileFacts["calls"][number]): string | null {
+  /** What a Java call gives: the class made by `new T()`, or the class the method called says it returns, in the terms of the file that declares the method. */
+  private javaReturned(facts: FileFacts, call: CallRef, depth: number): Declared | null {
+    if (depth >= MAX_CALL_DEPTH) return null;
+    if (call.receiver === "new") return this.javaType(facts, call.callee, this.javaOwner(facts, call.line)?.symbol.name ?? null);
+    const id = this.javaCall(facts, call, depth + 1);
+    const path = id ? id.slice(4, id.indexOf("#")) : null;
+    const name = id ? id.slice(id.indexOf("#") + 1) : "";
+    const declaring = path ? this.byPath.get(path) : undefined;
+    const method = path ? this.symbols.get(path)?.get(name) : undefined;
+    const className = name.slice(0, Math.max(0, name.lastIndexOf(".")));
+    const owner = declaring ? this.symbols.get(declaring.path)?.get(className) : undefined;
+    if (!declaring || !method?.returns || method.returns === "?" || !owner) return null;
+    // The method found is the nearest of its name. An overload further up may be the one really called.
+    if (this.javaOverloaded({ facts: declaring, symbol: owner }, name.slice(className.length + 1), method, 0)) return null;
+    return this.javaType(declaring, method.returns, className);
+  }
+
+  /** Whether a class above `type` declares the method with other parameters and another return type: an overload that a call of the name may mean instead. */
+  private javaOverloaded(type: Declared, name: string, method: SymbolFact, depth: number): boolean {
+    if (depth >= MAX_INHERITANCE_DEPTH) return false;
+    const written = [...(type.symbol.extends ? [type.symbol.extends] : []), ...(type.symbol.embeds ?? [])];
+    for (const parent of written.map((parentName) => this.javaType(type.facts, parentName, type.symbol.name))) {
+      if (!parent || parent.symbol === type.symbol) continue;
+      const inherited = this.symbols.get(parent.facts.path)?.get(`${parent.symbol.name}.${name}`);
+      if (inherited && inherited.params !== method.params && inherited.returns !== method.returns) return true;
+      if (this.javaOverloaded(parent, name, method, depth + 1)) return true;
+    }
+    return false;
+  }
+
+  private javaCall(facts: FileFacts, call: CallRef, depth = 0): string | null {
     const owner = this.javaOwner(facts, call.line);
     const within = owner?.symbol.name ?? null;
+    // `a.open().read()`, `new T().run()`: a method of whatever the inner call gives.
+    if (call.receiver === "()") return call.via ? this.javaMethod(this.javaReturned(facts, call.via, depth), call.callee) : null;
     if (call.receiver === "new") {
       const type = this.javaType(facts, call.callee, within);
       return type ? symbolId(type.facts.path, type.symbol.name) : null;
@@ -507,6 +539,7 @@ class Linker {
       return null;
     }
     const local = this.local(facts, call.receiver, call.line, call.column);
+    if (local?.kind === "instance" && !local.type && local.from) return this.javaMethod(this.javaReturned(facts, local.from, depth), call.callee);
     if (local) return local.kind === "instance" && local.type ? this.javaMethod(this.javaType(facts, local.type, within), call.callee) : null;
     // `Labels.format()`: a static method of a class.
     return /^[A-Z]/.test(call.receiver) && !call.receiver.includes(".") ? this.javaMethod(this.javaType(facts, call.receiver, within), call.callee) : null;

@@ -451,6 +451,56 @@ describe("Java", () => {
       }),
     ).toEqual(["y/src/main/java/a/One.java#One.f -> y/src/main/java/a/Svc.java#Svc.go", "y/src/main/java/a/U.java#U.f -> y/src/main/java/a/Repo.java#Repo.saveY"]);
   });
+  it("follows a method on what a call gives: new, a chain, and a var made by a call", async () => {
+    const lib = {
+      "src/com/acme/Builder.java":
+        "package com.acme;\n\npublic class Builder<Item> {\n    public Builder name(String n) {\n        return this;\n    }\n\n    public Report build() {\n        return new Report();\n    }\n\n    public Item first() {\n        return null;\n    }\n\n    public <Elem> Elem map() {\n        return null;\n    }\n\n    public <Elem> void local() {\n        class Loc {\n            Elem get() {\n                return null;\n            }\n        }\n        new Loc().get().print();\n    }\n\n    public java.util.List<Report> all() {\n        return null;\n    }\n\n    public Report pick(int i) {\n        return null;\n    }\n\n    public String pick(String s) {\n        return s;\n    }\n\n    public static Builder<String> start() {\n        return new Builder<>();\n    }\n}\n",
+      "src/com/acme/Report.java": "package com.acme;\n\npublic class Report {\n    public void print() {}\n\n    public Report copy() {\n        return this;\n    }\n}\n",
+      "src/com/acme/Item.java": "package com.acme;\n\npublic class Item {\n    public void print() {}\n}\n",
+      "src/com/acme/Elem.java": "package com.acme;\n\npublic class Elem {\n    public void print() {}\n}\n",
+    };
+    const from = async (body: string) =>
+      (await edgesOf("calls", { ...lib, "src/com/acme/App.java": `package com.acme;\n\npublic class App {\n    void run() {\n${body}    }\n}\n` }))
+        .filter((edge) => edge.startsWith("src/com/acme/App.java"))
+        .map((edge) => edge.replace("src/com/acme/App.java#App.run -> src/com/acme/", ""));
+
+    // A class declared inside a generic method sees the method's type parameter, not the class of that name.
+    expect((await edgesOf("calls", lib)).filter((edge) => edge.includes("Elem"))).toEqual([]);
+    // `new T()` and a static factory start a chain; each method is looked up on what the one before returns.
+    expect(await from('        new Builder<String>().name("a").build().print();\n')).toEqual(["Builder.java#Builder", "Builder.java#Builder.build", "Builder.java#Builder.name", "Report.java#Report.print"]);
+    expect(await from("        Builder.start().build().copy();\n")).toEqual(["Builder.java#Builder.build", "Builder.java#Builder.start", "Report.java#Report.copy"]);
+    // `var` takes its class from the call.
+    expect(await from("        var report = Builder.start().build();\n        report.print();\n")).toEqual(["Builder.java#Builder.build", "Builder.java#Builder.start", "Report.java#Report.print"]);
+    // Nothing for a type parameter of the class or of the method, a collection, or overloads that return different things.
+    expect(await from("        Builder.start().first().print();\n        Builder.start().map().print();\n        Builder.start().all().print();\n        Builder.start().pick(1).print();\n")).toEqual([
+      "Builder.java#Builder.all",
+      "Builder.java#Builder.first",
+      "Builder.java#Builder.map",
+      "Builder.java#Builder.pick",
+      "Builder.java#Builder.start",
+    ]);
+  });
+  it("resolves what a method returns where the method is declared, and stops at an overload it cannot tell apart", async () => {
+    const files = {
+      "a/Report.java": "package a;\n\npublic class Report {\n    public void print() {}\n}\n",
+      "a/Other.java": "package a;\n\npublic class Other {\n    public void print() {}\n}\n",
+      "a/Base.java": "package a;\n\npublic class Base {\n    public Report pick(int i) {\n        return null;\n    }\n\n    public Base self() {\n        return this;\n    }\n\n    public Report made() {\n        return null;\n    }\n}\n",
+      "a/Sub.java": "package a;\n\npublic class Sub extends Base {\n    public Other pick(String s) {\n        return null;\n    }\n\n    @Override\n    public Sub self() {\n        return this;\n    }\n\n    public void only() {}\n\n    public static Sub sub() {\n        return null;\n    }\n}\n",
+      "b/Report.java": "package b;\n\npublic class Report {\n    public void print() {}\n}\n",
+      "b/App.java":
+        "package b;\n\nimport a.Sub;\n\npublic class App {\n    Report mine() {\n        return null;\n    }\n\n    void run() {\n        Sub.sub().made().print();\n        Sub.sub().pick(1).print();\n        Sub.sub().self().only();\n        for (var each : Sub.sub().self()) {\n            each.only();\n        }\n        new Runnable() {\n            public void run() {\n                mine().print();\n            }\n        };\n    }\n}\n",
+    };
+    expect((await edgesOf("calls", files)).filter((edge) => edge.startsWith("b/App.java"))).toEqual([
+      // `made()` is declared in package a: its `Report` is a.Report, not the caller's own b.Report.
+      "b/App.java#App.run -> a/Base.java#Base.made",
+      "b/App.java#App.run -> a/Report.java#Report.print",
+      // `pick` is overloaded across Sub and Base with different results: nothing after it. `self` is overridden, so its result holds.
+      "b/App.java#App.run -> a/Sub.java#Sub.only",
+      "b/App.java#App.run -> a/Sub.java#Sub.pick",
+      "b/App.java#App.run -> a/Sub.java#Sub.self",
+      "b/App.java#App.run -> a/Sub.java#Sub.sub",
+    ]);
+  });
 });
 
 describe("a name declared inside a case clause", () => {

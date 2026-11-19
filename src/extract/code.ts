@@ -742,6 +742,18 @@ interface JavaScope {
   scopeEnd: number;
   /** Inside the body of an anonymous class. */
   anonymous?: boolean;
+  /** The type parameters of the classes around (`Item` in `class Box<Item>`): names that are not classes. */
+  generics?: Set<string>;
+}
+
+/** The names a `<..>` list on a class or a method declares. */
+function javaGenerics(node: Node, into: Set<string>): Set<string> {
+  const list = node.childForFieldName("type_parameters");
+  for (const parameter of list ? namedChildren(list) : []) {
+    const name = namedChildren(parameter).find((child) => child.type === "type_identifier" || child.type === "identifier");
+    if (name) into.add(name.text);
+  }
+  return into;
 }
 
 /** `Repo` from `Repo`, `Repo<T>`, `a.b.Repo`. Arrays and primitives say nothing about one class. */
@@ -757,11 +769,45 @@ function javaTypeList(node: Node | null | undefined): string[] {
   return (list ? namedChildren(list) : []).map((type) => javaTypeName(type)).filter((name): name is string => name !== null);
 }
 
-/** A name with a class written as its type: an instance of it between `line` and `endLine`. `var` takes the type from `new T()`. */
-function javaDeclared(name: Node | null, type: Node | null, value: Node | null, range: { line: number; endLine: number; column: number }, facts: FileFacts): void {
+/**
+ * A call written simply enough to say what is called: `f()`, `x.f()`, `this.f()`, `this.field.f()`,
+ * `new T()`, and a method on the result of another such call (`a.open().read()`, `new T().run()`).
+ */
+function javaCallRef(node: Node | null | undefined, scope: JavaScope, depth = 0): CallRef | null {
+  while (node?.type === "parenthesized_expression") node = namedChildren(node)[0];
+  if (!node || depth > 8) return null;
+  const at = { line: line(node), column: column(node) };
+  if (node.type === "object_creation_expression") {
+    const type = javaTypeName(node.childForFieldName("type"));
+    return type ? { callee: type, receiver: "new", ...at } : null;
+  }
+  if (node.type !== "method_invocation") return null;
+  const name = node.childForFieldName("name")?.text;
+  const object = node.childForFieldName("object");
+  if (!name) return null;
+  // Inside an anonymous class, a call with no receiver belongs to a class this file may not show.
+  if ((!object || object.type === "this" || object.type === "super") && scope.anonymous) return null;
+  if (!object) return { callee: name, receiver: null, ...at };
+  if (object.type === "identifier" || object.type === "this" || object.type === "super") return { callee: name, receiver: object.text, ...at };
+  if (object.type === "field_access" && object.childForFieldName("object")?.type === "this") {
+    const field = object.childForFieldName("field");
+    return field ? { callee: name, receiver: `this.${field.text}`, ...at } : null;
+  }
+  const via = javaCallRef(object, scope, depth + 1);
+  return via ? { callee: name, receiver: "()", ...at, via } : null;
+}
+
+/**
+ * A name with a class written as its type: an instance of it between `line` and `endLine`. `var`
+ * takes the type from `new T()`, or from what the method called returns.
+ */
+function javaDeclared(name: Node | null, type: Node | null, value: Node | null, range: { line: number; endLine: number; column: number }, facts: FileFacts, scope?: JavaScope): void {
   if (name?.type !== "identifier") return;
-  const written = type?.text === "var" ? (value?.type === "object_creation_expression" ? javaTypeName(value.childForFieldName("type")) : null) : javaTypeName(type);
+  const inferred = type?.text === "var";
+  const written = inferred ? (value?.type === "object_creation_expression" ? javaTypeName(value.childForFieldName("type")) : null) : javaTypeName(type);
+  const from = inferred && !written && scope ? javaCallRef(value, scope) : null;
   if (written) facts.locals.push({ name: name.text, kind: "instance", type: written, ...range });
+  else if (from) facts.locals.push({ name: name.text, kind: "instance", from, ...range });
   else facts.locals.push({ name: name.text, kind: "other", ...range });
 }
 
@@ -817,7 +863,7 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
         if (table?.type === "string_literal") facts.tables.push({ name: unquote(table.text).toLowerCase(), op: "define", line: line(annotation) });
       }
 
-      const inside: JavaScope = { owner: qualified, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node) };
+      const inside: JavaScope = { owner: qualified, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node), generics: javaGenerics(node, new Set(scope.generics)) };
       // The components of a record are its fields.
       for (const component of namedChildren(node.childForFieldName("parameters") ?? node).filter((child) => child.type === "formal_parameter")) {
         const range = { line: line(node), endLine: endLine(node), column: column(node) };
@@ -843,7 +889,16 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
     case "lambda_expression": {
       const name = node.childForFieldName("name")?.text;
       if (node.type === "method_declaration" && name && scope.owner) {
-        addSymbol(facts, { name: `${scope.owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false });
+        // What the method returns, unless that is a type parameter of the method or of a class around it.
+        const written = javaTypeName(node.childForFieldName("type"));
+        const returns = written && !javaGenerics(node, new Set(scope.generics)).has(written) ? written : "?";
+        const overload = facts.symbols.find((symbol) => symbol.name === `${scope.owner}.${name}`);
+        // Overloads are one symbol: when they return different things, nothing can be said for a call of the name.
+        if (overload && overload.returns !== returns) overload.returns = "?";
+        // The parameter types tell an override of an inherited method (same list) from an overload of it (another list).
+        const parameterList = node.childForFieldName("parameters");
+        const params = (parameterList ? namedChildren(parameterList) : []).map((parameter) => parameter.childForFieldName("type")?.text.replace(/\s+/g, "") ?? "?").join(",");
+        addSymbol(facts, { name: `${scope.owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false, returns, params });
       }
       const parameters = node.childForFieldName("parameters");
       if (parameters?.type === "identifier") facts.locals.push({ name: parameters.text, kind: "other", ...here });
@@ -855,12 +910,12 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
     }
     case "local_variable_declaration":
       for (const declarator of namedChildren(node).filter((child) => child.type === "variable_declarator")) {
-        javaDeclared(declarator.childForFieldName("name"), node.childForFieldName("type"), declarator.childForFieldName("value"), { ...here, endLine: scope.scopeEnd }, facts);
+        javaDeclared(declarator.childForFieldName("name"), node.childForFieldName("type"), declarator.childForFieldName("value"), { ...here, endLine: scope.scopeEnd }, facts, scope);
       }
       break;
     case "enhanced_for_statement":
     case "resource":
-      javaDeclared(node.childForFieldName("name"), node.childForFieldName("type"), node.childForFieldName("value"), node.type === "resource" ? { ...here, endLine: scope.scopeEnd } : here, facts);
+      javaDeclared(node.childForFieldName("name"), node.childForFieldName("type"), node.type === "resource" ? node.childForFieldName("value") : null, node.type === "resource" ? { ...here, endLine: scope.scopeEnd } : here, facts, scope);
       break;
     case "catch_clause": {
       const parameter = namedChildren(node).find((child) => child.type === "catch_formal_parameter");
@@ -869,26 +924,16 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
       break;
     }
     case "method_invocation": {
-      const name = node.childForFieldName("name")?.text;
+      const call = javaCallRef(node, scope);
+      if (call) facts.calls.push(call);
+      // `Labels.format()`: a capitalised receiver may be a class that is used without being imported.
       const object = node.childForFieldName("object");
-      const at = { line: line(node), column: column(node) };
-      if (!name) break;
-      const implicit = !object || object.type === "this" || object.type === "super";
-      if (implicit && scope.anonymous) break;
-      if (!object) facts.calls.push({ callee: name, receiver: null, ...at });
-      else if (object.type === "identifier" || object.type === "this" || object.type === "super") {
-        facts.calls.push({ callee: name, receiver: object.text, ...at });
-        // `Labels.format()`: a capitalised receiver may be a class that is used without being imported.
-        if (object.type === "identifier" && /^[A-Z]/.test(object.text)) javaUse(object.text, object, facts);
-      } else if (object.type === "field_access" && object.childForFieldName("object")?.type === "this") {
-        const field = object.childForFieldName("field");
-        if (field) facts.calls.push({ callee: name, receiver: `this.${field.text}`, ...at });
-      }
+      if (object?.type === "identifier" && /^[A-Z]/.test(object.text)) javaUse(object.text, object, facts);
       break;
     }
     case "object_creation_expression": {
-      const type = javaTypeName(node.childForFieldName("type"));
-      if (type) facts.calls.push({ callee: type, receiver: "new", line: line(node), column: column(node) });
+      const call = javaCallRef(node, scope);
+      if (call) facts.calls.push(call);
       break;
     }
     case "annotation":
@@ -909,10 +954,12 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
   }
 
   let inner = JAVA_SCOPES.has(node.type) ? { ...scope, scopeEnd: endLine(node) } : scope;
+  // A class declared inside a generic method sees the method's type parameters.
+  if (node.type === "method_declaration" && node.childForFieldName("type_parameters")) inner = { ...inner, generics: javaGenerics(node, new Set(scope.generics)) };
   // The body of `new Foo() { ... }` is a class of its own with no name: its fields are its own, its
   // methods are not symbols, and what an unqualified call in it means depends on `Foo`, which may not be in this file.
   if (node.type === "class_body" && node.parent?.type === "object_creation_expression") {
-    inner = { owner: null, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node), anonymous: true };
+    inner = { owner: null, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node), anonymous: true, generics: scope.generics };
   }
   for (const child of namedChildren(node)) walkJava(child, facts, inner);
 }
