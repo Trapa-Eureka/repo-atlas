@@ -291,7 +291,10 @@ TypeScript (ESM) on Node.js 22+ · [web-tree-sitter](https://github.com/tree-sit
 - [x] **Phase 2**: graph: linking, SQLite store, incremental indexing
 - [x] **Phase 3**: queries and CLI: `search`, `context`, `impact`, `path`, `mermaid`, `stats`, `export`
 - [x] **Phase 4**: agents: MCP server, `atlas init`
-- [ ] **Phase 5**: release: npm package (done: `repo-atlas-cli`), more languages, IDE integration
+- [ ] **Phase 5**: release
+  - [x] npm package ([`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli))
+  - [ ] more languages
+  - [ ] IDE integration
 - [ ] **Phase 6**: paid plans: hosted private-repository indexing, shared team graph, CI integration (planned)
 
 ## Contributing

@@ -293,7 +293,10 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
 - [x] **Phase 2**: 그래프: 연결, SQLite 저장소, 증분 인덱싱
 - [x] **Phase 3**: 질의와 CLI: `search`, `context`, `impact`, `path`, `mermaid`, `stats`, `export`
 - [x] **Phase 4**: 에이전트: MCP 서버, `atlas init`
-- [ ] **Phase 5**: 릴리스: npm 패키지(완료: `repo-atlas-cli`), 언어 추가, IDE 연동
+- [ ] **Phase 5**: 릴리스
+  - [x] npm 패키지 ([`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli))
+  - [ ] 언어 추가
+  - [ ] IDE 연동
 - [ ] **Phase 6**: 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 (계획중)
 
 ## 기여
