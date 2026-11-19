@@ -181,6 +181,82 @@ describe("methods", () => {
   });
 });
 
+describe("what a call returns, in TypeScript, JavaScript and Python", () => {
+  it("follows a method on what a TypeScript or JavaScript call gives", async () => {
+    const lib = {
+      "src/report.ts": "export class Report {\n  print() {}\n  size() {}\n}\n\nexport class Other {\n  print() {}\n}\n",
+      "src/builder.ts":
+        'import { Report, Other } from "./report";\n\nexport class Builder<Item> {\n  name(n: string) {\n    return this;\n  }\n\n  build(): Report {\n    return new Report();\n  }\n\n  async load(): Promise<Report> {\n    return new Report();\n  }\n\n  first(): Item {\n    return null as any;\n  }\n\n  either(flag: boolean) {\n    if (flag) return new Report();\n    return new Other();\n  }\n}\n\nexport function start(): Builder<string> {\n  return new Builder();\n}\n\nexport const make = () => new Report();\n',
+      "src/item.ts": "export class Item {\n  print() {}\n}\n",
+    };
+    const from = async (body: string) =>
+      (await edgesOf("calls", { ...lib, "src/app.ts": `import { Builder, start, make } from "./builder";\nimport { Report } from "./report";\n\nexport async function run() {\n${body}}\n` }))
+        .filter((edge) => edge.startsWith("src/app.ts"))
+        .map((edge) => edge.replace("src/app.ts#run -> src/", ""));
+
+    // `new`, a method that returns `this`, and a written return type, one after another.
+    expect(await from('  new Builder().name("a").build().print();\n')).toEqual(["builder.ts#Builder", "builder.ts#Builder.build", "builder.ts#Builder.name", "report.ts#Report.print"]);
+    // A variable made by a call, by a function, and by a function that returns `new T()` with no type written.
+    expect(await from("  const builder = start();\n  const report = builder.build();\n  report.size();\n  make().print();\n")).toEqual(["builder.ts#Builder.build", "builder.ts#make", "builder.ts#start", "report.ts#Report.print", "report.ts#Report.size"]);
+    // A promise gives its value only once awaited.
+    expect(await from("  const later = start().load();\n  later.print();\n  const now = await start().load();\n  now.size();\n  (await start().load()).print();\n")).toEqual(["builder.ts#Builder.load", "builder.ts#start", "report.ts#Report.print", "report.ts#Report.size"]);
+    // Nothing for a type parameter, or for a function whose returns disagree.
+    expect(await from("  start().first().print();\n  start().either(true).print();\n")).toEqual(["builder.ts#Builder.either", "builder.ts#Builder.first", "builder.ts#start"]);
+  });
+
+  it("follows a method on what a Python call gives: a class called, a written return type, a field", async () => {
+    const lib = {
+      "shop/store.py":
+        'class Row:\n    def name(self):\n        pass\n\n    def size(self):\n        pass\n\n\nclass Base:\n    def close(self):\n        pass\n\n\nclass Store(Base):\n    def first(self) -> "Row":\n        return Row()\n\n    async def fetch(self) -> Row:\n        return Row()\n\n    def rows(self) -> list[Row]:\n        return []\n\n\ndef open_store() -> Store:\n    return Store()\n',
+    };
+    const from = async (source: string) =>
+      (await edgesOf("calls", { ...lib, "shop/app.py": `from shop.store import Store, Row, open_store\n\n${source}` })).filter((edge) => edge.startsWith("shop/app.py")).map((edge) => edge.replace(/^shop\/app\.py#[\w.]+ -> shop\/store\.py#/, "")).sort();
+
+    // A class called makes an instance; a method is found on it, on its parent, and on what a method says it returns.
+    expect(await from("def run():\n    store = Store()\n    store.close()\n    store.first().name()\n")).toEqual(["Base.close", "Row.name", "Store", "Store.first"]);
+    expect(await from("def run():\n    row = open_store().first()\n    row.size()\n")).toEqual(["Row.size", "Store.first", "open_store"]);
+    // A parameter with a class written, and a coroutine, which gives its value only once awaited.
+    expect(await from("async def run(store: Store):\n    later = store.fetch()\n    later.name()\n    row = await store.fetch()\n    row.size()\n")).toEqual(["Row.size", "Store.fetch"]);
+    // Nothing for a collection, for a name given something else afterwards, or for a parameter that hides a class.
+    expect(await from("def run(Row):\n    store = Store()\n    store.rows().name()\n    store = other()\n    store.close()\n    Row().name()\n")).toEqual(["Store", "Store.rows"]);
+    // A field holds a class when every assignment in the class agrees, also one passed in with its type written.
+    expect(await from("class App:\n    def __init__(self, row: Row):\n        self.store = Store()\n        self.row = row\n        self.mixed = Store()\n\n    def swap(self, x):\n        self.mixed = x\n\n    def run(self):\n        self.store.first()\n        self.row.size()\n        self.mixed.close()\n")).toEqual(["Row.size", "Store", "Store.first"]);
+    // A name assigned in a class body is an attribute, not a variable that hides a function of the file.
+    expect(await from("class Config:\n    open_store: int = 1\n\n\ndef run():\n    open_store()\n")).toEqual(["open_store"]);
+  });
+
+  it("keeps a Python name of the module what its def or import made it, and a variable of a function what the function made it", async () => {
+    const lib = {
+      "shop/store.py": 'from typing import overload\n\n\nclass Row:\n    def size(self):\n        pass\n\n\nclass Other:\n    def size(self):\n        pass\n\n\nclass Store:\n    def first(self) -> Row:\n        return Row()\n\n\ndef helper():\n    pass\n\n\ndef validate():\n    pass\n\n\n@overload\ndef pick(key: int) -> Row: ...\n@overload\ndef pick(key: str) -> Other: ...\ndef pick(key):\n    pass\n',
+      "shop/fast.py": "def speedy():\n    pass\n",
+    };
+    const from = async (source: string) =>
+      (await edgesOf("calls", { ...lib, "shop/app.py": source })).filter((edge) => edge.startsWith("shop/app.py")).map((edge) => edge.replace(/^shop\/app\.py(?:#[\w.]+)? -> shop\//, "")).sort();
+
+    // At the top of a file: a fallback definition, an optional import, a function wrapped again, a class kept inside a class.
+    expect(await from("import sys\n\nif sys.version_info >= (3, 11):\n    def u(s):\n        return s\nelse:\n    def u(s):\n        return s\n\ntry:\n    from shop.store import helper\nexcept ImportError:\n    def helper():\n        pass\n\ndef run():\n    u(1)\n    helper()\n")).toEqual(["app.py#u", "store.py#helper"]);
+    expect(await from("try:\n    from shop import fast\nexcept ImportError:\n    fast = None\n\ndef run():\n    fast.speedy()\n")).toEqual(["fast.py#speedy"]);
+    expect(await from("from shop.store import helper, validate\n\nhelper = staticmethod(helper)\n\nclass Form:\n    class Meta:\n        helper = 1\n\n        def validate(self):\n            pass\n\ndef run():\n    helper()\n    validate()\n")).toEqual(["store.py#helper", "store.py#validate"]);
+    // In a function: an import after an assignment rebinds the name; a comprehension's variable ends with it and covers its element.
+    expect(await from("def run(flag):\n    helper = None\n    if flag:\n        from shop.store import helper\n    helper()\n")).toEqual(["store.py#helper"]);
+    expect(await from("from shop.store import helper, Store\n\ndef run(rows):\n    store = Store()\n    xs = [store.first() for store in rows]\n    ys = [helper for helper in rows]\n    helper()\n")).toEqual(["store.py#Store", "store.py#helper"]);
+    // Not followed: overloads that return different classes, a walrus or a pattern that rebinds, the first parameter of a static method.
+    expect(await from("from shop.store import pick, Store, validate\n\ndef run(make):\n    pick(1).size()\n    store = Store()\n    if (store := make()):\n        store.first()\n\nclass Tool:\n    @staticmethod\n    def check(validate):\n        validate()\n")).toEqual(["store.py#Store", "store.py#pick"]);
+    expect(await from("from shop.store import Store\n\nclass App:\n    def __init__(self):\n        self.store = Store()\n\n    def swap(self, pair):\n        self.store, self.other = pair\n\n    def run(self):\n        self.store.first()\n")).toEqual(["store.py#Store"]);
+  });
+
+  it("says nothing about what an overloaded or generator TypeScript function returns", async () => {
+    // Only `one`, a field holding an arrow function that makes a Report, says what it gives.
+    expect(
+      (await edgesOf("calls", {
+        "src/lib.ts":
+          "export class Report {\n  print() {}\n}\n\nexport class Tool {\n  pick(a: string): string;\n  pick(a: number): Report;\n  pick(a: any): Report {\n    return new Report();\n  }\n\n  *each() {\n    return new Report();\n  }\n\n  one = () => new Report();\n}\n",
+        "src/app.js": 'import { Tool } from "./lib";\n\nexport function run() {\n  const tool = new Tool();\n  tool.pick(1).print();\n  tool.each().print();\n  tool.one().print();\n}\n',
+      })).filter((edge) => edge.startsWith("src/app.js")),
+    ).toEqual(["src/app.js#run -> src/lib.ts#Report.print", "src/app.js#run -> src/lib.ts#Tool", "src/app.js#run -> src/lib.ts#Tool.each", "src/app.js#run -> src/lib.ts#Tool.one", "src/app.js#run -> src/lib.ts#Tool.pick"]);
+  });
+});
+
 describe("env keys in code only", () => {
   it("ignores a key named in a string, a comment or a docstring", async () => {
     const script = await extractFile(

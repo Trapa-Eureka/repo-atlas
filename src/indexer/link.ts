@@ -1172,15 +1172,64 @@ class Linker {
     return parent && parent !== classId ? this.memberOf(parent, name, depth + 1) : null;
   }
 
-  private instanceMember(facts: FileFacts, local: LocalFact, name: string): string | null {
-    const owner = local.type ? this.resolveName(facts, local.type) : null;
+  private instanceMember(facts: FileFacts, local: LocalFact, name: string, depth = 0): string | null {
+    const owner = local.type ? this.resolveName(facts, local.type) : local.from ? this.scriptReturned(facts, local.from, depth) : null;
     return owner ? this.memberOf(owner, name) : null;
   }
 
+  /**
+   * The class a TypeScript or JavaScript call gives: the one made by `new T()`, or the one the
+   * function called says it returns, as named in the file that declares the function. A function
+   * that returns a promise of a class gives the class only where the caller awaited it.
+   */
+  private scriptReturned(facts: FileFacts, call: CallRef, depth: number): string | null {
+    if (depth >= MAX_CALL_DEPTH) return null;
+    const isClass = (id: string | null) => (id && this.classes.has(id) ? id : null);
+    if (call.receiver === "new") return this.local(facts, call.callee, call.line, call.column) ? null : isClass(this.resolveName(facts, call.callee));
+    const id = this.scriptTarget(facts, call, depth + 1);
+    // In Python a class is made by calling it: `Store()` gives a `Store`.
+    if (facts.language === "python" && isClass(id)) return id;
+    const path = id ? id.slice(4, id.indexOf("#")) : null;
+    const declaring = path ? this.byPath.get(path) : undefined;
+    const returns = id && path ? this.symbols.get(path)?.get(id.slice(id.indexOf("#") + 1))?.returns : undefined;
+    if (!declaring || !returns || returns.startsWith("?") !== (call.tried === true)) return null;
+    return isClass(this.resolveName(declaring, returns.replace(/^\?/, "")));
+  }
+
+  /** What a TypeScript, JavaScript or Python call reaches, as far as the file and its imports say. */
+  private scriptTarget(facts: FileFacts, call: CallRef, depth = 0): string | null {
+    const caller = this.enclosing(facts, call.line);
+    const classId = caller?.name.includes(".") ? symbolId(facts.path, caller.name.split(".")[0] ?? "") : null;
+    if (call.receiver === null) {
+      // `const { parse } = db; parse()` is a call of `db.parse`.
+      // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.
+      const local = this.local(facts, call.callee, call.line, call.column);
+      // In Python a name of the module given the result of a call (`helper = cached(helper)`) is still called by that name.
+      if (!local || (facts.language === "python" && local.kind === "instance")) return this.resolveName(facts, call.callee);
+      return local.kind === "member" && local.object && local.property ? this.resolveMember(facts, local.object, local.property, local.line, local.column) : null;
+    }
+    // `a.open().read()`, `new T().run()`: a method of the class the inner call gives.
+    if (call.receiver === "()") {
+      const owner = call.via ? this.scriptReturned(facts, call.via, depth) : null;
+      return owner ? this.memberOf(owner, call.callee) : null;
+    }
+    if (call.receiver === "this" || call.receiver === "self" || call.receiver === "cls") return classId ? this.memberOf(classId, call.callee) : null;
+    if (call.receiver === "super") {
+      const declared = classId ? this.classes.get(classId) : undefined;
+      const parent = declared?.symbol.extends ? this.resolveName(declared.facts, declared.symbol.extends) : null;
+      return parent ? this.memberOf(parent, call.callee) : null;
+    }
+    if (call.receiver.startsWith("this.") || call.receiver.startsWith("self.")) {
+      const field = this.local(facts, call.receiver, call.line, call.column);
+      return field?.kind === "instance" ? this.instanceMember(facts, field, call.callee, depth) : null;
+    }
+    return this.resolveMember(facts, call.receiver, call.callee, call.line, call.column, depth);
+  }
+
   /** `object.property`, where `object` is a name in this file: a typed local, a symbol, or an import. */
-  private resolveMember(facts: FileFacts, object: string, property: string, line: number, column?: number): string | null {
+  private resolveMember(facts: FileFacts, object: string, property: string, line: number, column?: number, depth = 0): string | null {
     const local = this.local(facts, object, line, column);
-    if (local?.kind === "instance") return this.instanceMember(facts, local, property);
+    if (local?.kind === "instance") return this.instanceMember(facts, local, property, depth);
     if (local) return null;
     if (this.symbols.get(facts.path)?.has(object)) return this.memberOf(symbolId(facts.path, object), property);
     const binding = this.bindings(facts).get(object);
@@ -1209,7 +1258,6 @@ class Linker {
       const caller = this.enclosing(facts, call.line);
       let target: string | null = null;
 
-      const classId = caller?.name.includes(".") ? symbolId(facts.path, caller.name.split(".")[0] ?? "") : null;
       if (facts.language === "go") {
         target = this.goCall(facts, call);
       } else if (facts.language === "java") {
@@ -1218,23 +1266,8 @@ class Linker {
         target = this.rustCall(facts, call, caller);
       } else if (facts.language === "ruby") {
         target = this.rubyCall(facts, call, caller);
-      } else if (call.receiver === null) {
-        // `const { parse } = db; parse()` is a call of `db.parse`.
-        // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.
-        const local = this.local(facts, call.callee, call.line, call.column);
-        if (!local) target = this.resolveName(facts, call.callee);
-        else if (local.kind === "member" && local.object && local.property) target = this.resolveMember(facts, local.object, local.property, local.line, local.column);
-      } else if (call.receiver === "this" || call.receiver === "self" || call.receiver === "cls") {
-        if (classId) target = this.memberOf(classId, call.callee);
-      } else if (call.receiver === "super") {
-        const declared = classId ? this.classes.get(classId) : undefined;
-        const parent = declared?.symbol.extends ? this.resolveName(declared.facts, declared.symbol.extends) : null;
-        if (parent) target = this.memberOf(parent, call.callee);
-      } else if (call.receiver.startsWith("this.")) {
-        const field = this.local(facts, call.receiver, call.line, call.column);
-        if (field?.kind === "instance") target = this.instanceMember(facts, field, call.callee);
       } else {
-        target = this.resolveMember(facts, call.receiver, call.callee, call.line, call.column);
+        target = this.scriptTarget(facts, call);
       }
 
       if (!target) continue;

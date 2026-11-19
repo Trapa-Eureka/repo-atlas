@@ -43,10 +43,116 @@ interface ScriptScope {
   classRange: [number, number] | null;
   /** Last line of the innermost block or function: where a name declared here stops being in scope. */
   scopeEnd: number;
+  /** The type parameters of the class around (`Item` in `class Box<Item>`): names that are not classes. */
+  generics?: Set<string>;
 }
 
 function nested(scope: ScriptScope): ScriptScope {
-  return { topLevel: false, exported: false, isDefault: false, className: null, classRange: scope.classRange, scopeEnd: scope.scopeEnd };
+  return { topLevel: false, exported: false, isDefault: false, className: null, classRange: scope.classRange, scopeEnd: scope.scopeEnd, generics: scope.generics };
+}
+
+/** The names a `<..>` list on a class or a function declares. */
+function scriptGenerics(node: Node, into: Set<string>): Set<string> {
+  const list = node.childForFieldName("type_parameters");
+  for (const parameter of list ? namedChildren(list) : []) {
+    const name = parameter.childForFieldName("name") ?? namedChildren(parameter)[0];
+    if (name) into.add(name.text);
+  }
+  return into;
+}
+
+/** The value under `await` and parentheses, and whether it was awaited. */
+function scriptAwaited(value: Node | null | undefined): { value: Node | null; awaited: boolean } {
+  let awaited = false;
+  let at = value ?? null;
+  while (at && (at.type === "await_expression" || at.type === "parenthesized_expression")) {
+    if (at.type === "await_expression") awaited = true;
+    at = namedChildren(at)[0] ?? null;
+  }
+  return { value: at, awaited };
+}
+
+/**
+ * What a function returns, when it says so: the class written as its return type (`?T` for
+ * `Promise<T>`, which gives a `T` once awaited), or, with no type written, the class around it
+ * when every `return` is `return this`, or `T` when every `return` is `return new T(..)`.
+ */
+function scriptReturns(fn: Node, scope: ScriptScope, declaration: Node = fn): string | null {
+  // A generator returns an iterator, whatever its `return` says. Overload signatures are one symbol with
+  // the implementation, and which of them a call means cannot be told.
+  if (fn.type.startsWith("generator_function") || children(fn).some((child) => child.type === "*")) return null;
+  const name = declaration.childForFieldName("name")?.text;
+  const overloaded = (declaration.parent ? namedChildren(declaration.parent) : []).some(
+    (sibling) => (sibling.type === "method_signature" || sibling.type === "function_signature" || sibling.type === "abstract_method_signature") && sibling.childForFieldName("name")?.text === name,
+  );
+  if (name && overloaded) return null;
+  const generics = scriptGenerics(fn, new Set(scope.generics));
+  const known = (name: string | null | undefined) => (name && !generics.has(name) ? name : null);
+  const annotation = fn.childForFieldName("return_type");
+  const isAsync = children(fn).some((child) => child.type === "async");
+  if (annotation) {
+    const type = namedChildren(annotation)[0];
+    if (type?.type === "this_type") return scope.className;
+    const promised = type?.type === "generic_type" && type.childForFieldName("name")?.text === "Promise";
+    if (!promised) return isAsync ? null : known(typeName(annotation));
+    const argument = namedChildren(type.childForFieldName("type_arguments") ?? type).find((child) => child.type !== "type_identifier" || child.id !== type.childForFieldName("name")?.id);
+    const inner = argument?.type === "generic_type" ? argument.childForFieldName("name") : argument;
+    const name = inner?.type === "type_identifier" && !/^[A-Z]$/.test(inner.text) ? known(inner.text) : null;
+    return name ? `?${name}` : null;
+  }
+  const body = fn.childForFieldName("body");
+  if (!body) return null;
+  // An arrow function with an expression for a body returns that expression.
+  const returned: (Node | null)[] = [];
+  if (body.type !== "statement_block") returned.push(body);
+  else {
+    const collect = (node: Node) => {
+      for (const child of namedChildren(node)) {
+        if (child.type === "return_statement") returned.push(namedChildren(child)[0] ?? null);
+        // A function inside has returns of its own.
+        else if (!SCRIPT_FUNCTION_VALUES.has(child.type) && child.type !== "function_declaration" && child.type !== "method_definition" && child.type !== "class" && child.type !== "class_declaration") collect(child);
+      }
+    };
+    collect(body);
+  }
+  if (returned.length === 0) return null;
+  const names = new Set(
+    returned.map((value) => {
+      if (value?.type === "this") return scope.className ?? "";
+      const constructor = value?.type === "new_expression" ? value.childForFieldName("constructor") : null;
+      return constructor?.type === "identifier" ? constructor.text : "";
+    }),
+  );
+  const [only] = names;
+  return names.size === 1 && only ? (isAsync ? "?" : "") + only : null;
+}
+
+/**
+ * A call written simply enough to say what is called: `f()`, `x.f()`, `this.f()`, `this.field.f()`,
+ * `new T()`, and a method on the result of another such call (`a.open().read()`, `(await load()).run()`).
+ */
+function scriptCallRef(node: Node | null | undefined, depth = 0): CallRef | null {
+  if (!node || depth > 8) return null;
+  const at = { line: line(node), column: column(node) };
+  if (node.type === "new_expression") {
+    const constructor = node.childForFieldName("constructor");
+    return constructor?.type === "identifier" ? { callee: constructor.text, receiver: "new", ...at } : null;
+  }
+  if (node.type !== "call_expression") return null;
+  const callee = node.childForFieldName("function");
+  if (callee?.type === "identifier") return { callee: callee.text, receiver: null, ...at };
+  if (callee?.type !== "member_expression") return null;
+  const object = callee.childForFieldName("object");
+  const property = callee.childForFieldName("property");
+  if (!object || !property) return null;
+  if (object.type === "identifier" || object.type === "this" || object.type === "super") return { callee: property.text, receiver: object.text, ...at };
+  if (object.type === "member_expression" && object.childForFieldName("object")?.type === "this") {
+    const field = object.childForFieldName("property");
+    return field?.type === "property_identifier" ? { callee: property.text, receiver: `this.${field.text}`, ...at } : null;
+  }
+  const { value, awaited } = scriptAwaited(object);
+  const via = scriptCallRef(value, depth + 1);
+  return via ? { callee: property.text, receiver: "()", ...at, via: { ...via, ...(awaited ? { tried: true } : {}) } } : null;
 }
 
 function importNames(clause: Node): ImportedName[] {
@@ -125,10 +231,8 @@ function scriptCall(node: Node, facts: FileFacts): void {
     if (specifier) facts.imports.push({ specifier, names: [], reexport: false, star: false, line: line(node) });
     return;
   }
-  if (callee.type === "identifier") {
-    facts.calls.push({ callee: callee.text, receiver: null, line: line(node), column: column(node) });
-    return;
-  }
+  const call = scriptCallRef(node);
+  if (call) facts.calls.push(call);
   if (callee.type !== "member_expression") return;
   const object = callee.childForFieldName("object");
   const property = callee.childForFieldName("property");
@@ -137,12 +241,6 @@ function scriptCall(node: Node, facts: FileFacts): void {
   if (property.text === "from" && !NOT_A_QUERY_BUILDER.has(object.text) && !/(?:^|\.)[A-Z][A-Z0-9_]*[a-z]\w*$/.test(object.text)) {
     const table = firstStringArgument(node);
     if (table && /^[A-Za-z_]\w*$/.test(table)) facts.tables.push({ name: table.toLowerCase(), op: "read", line: line(node) });
-  }
-  if (object.type === "identifier" || object.type === "this" || object.type === "super") {
-    facts.calls.push({ callee: property.text, receiver: object.text, line: line(node), column: column(node) });
-  } else if (object.type === "member_expression" && object.childForFieldName("object")?.type === "this") {
-    const field = object.childForFieldName("property");
-    if (field?.type === "property_identifier") facts.calls.push({ callee: property.text, receiver: `this.${field.text}`, line: line(node), column: column(node) });
   }
 }
 
@@ -205,10 +303,14 @@ function scriptDeclarator(declarator: Node, facts: FileFacts, scope: ScriptScope
   const type = constructed?.type === "identifier" ? constructed.text : typeName(declarator.childForFieldName("type"));
   const object = value?.type === "member_expression" ? value.childForFieldName("object") : null;
   const property = value?.type === "member_expression" ? value.childForFieldName("property") : null;
+  // `const x = load()`, `const x = await a.open()`: no type is written, but the function called may say what it returns.
+  const made = type ? null : scriptAwaited(value);
+  const call = made?.value?.type === "call_expression" ? scriptCallRef(made.value) : null;
   if (type) facts.locals.push({ name: name.text, kind: "instance", type, ...range });
   else if (object?.type === "identifier" && property?.type === "property_identifier") {
     facts.locals.push({ name: name.text, kind: "member", object: object.text, property: property.text, ...range });
-  } else facts.locals.push({ name: name.text, kind: "other", ...range });
+  } else if (call) facts.locals.push({ name: name.text, kind: "instance", from: { ...call, ...(made?.awaited ? { tried: true } : {}) }, ...range });
+  else facts.locals.push({ name: name.text, kind: "other", ...range });
   return false;
 }
 
@@ -318,7 +420,8 @@ function walkScript(node: Node, facts: FileFacts, scope: ScriptScope): void {
     case "generator_function_declaration": {
       const name = node.childForFieldName("name")?.text;
       if (name && scope.topLevel) {
-        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: scope.exported, isDefault: scope.isDefault });
+        const returns = scriptReturns(node, scope);
+        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: scope.exported, isDefault: scope.isDefault, ...(returns ? { returns } : {}) });
       } else if (name) {
         facts.locals.push({ name, kind: "other", line: line(node), endLine: scope.scopeEnd, column: column(node) });
       }
@@ -341,7 +444,7 @@ function walkScript(node: Node, facts: FileFacts, scope: ScriptScope): void {
         const symbol: SymbolFact = { name, kind: "class", line: line(node), endLine: endLine(node), exported: scope.exported, isDefault: scope.isDefault };
         if (parent?.type === "identifier") symbol.extends = parent.text;
         addSymbol(facts, symbol);
-        const inside: ScriptScope = { topLevel: false, exported: false, isDefault: false, className: name, classRange: [line(node), endLine(node)], scopeEnd: endLine(node) };
+        const inside: ScriptScope = { topLevel: false, exported: false, isDefault: false, className: name, classRange: [line(node), endLine(node)], scopeEnd: endLine(node), generics: scriptGenerics(node, new Set()) };
         for (const child of namedChildren(node)) walkScript(child, facts, inside);
         return;
       }
@@ -350,7 +453,11 @@ function walkScript(node: Node, facts: FileFacts, scope: ScriptScope): void {
     case "method_definition": {
       const name = node.childForFieldName("name")?.text;
       if (name && scope.className) {
-        addSymbol(facts, { name: `${scope.className}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false });
+        const returns = scriptReturns(node, scope);
+        // A getter and a setter of one name are one symbol: when they disagree, nothing is said.
+        const earlier = facts.symbols.find((symbol) => symbol.name === `${scope.className}.${name}`);
+        if (earlier && (earlier.returns ?? null) !== returns) delete earlier.returns;
+        addSymbol(facts, { name: `${scope.className}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false, ...(returns ? { returns } : {}) });
       }
       break;
     }
@@ -361,7 +468,8 @@ function walkScript(node: Node, facts: FileFacts, scope: ScriptScope): void {
       if (!name || !scope.className || !scope.classRange) break;
       // `run = () => {}` is a method in all but syntax.
       if (value && SCRIPT_FUNCTION_VALUES.has(value.type)) {
-        addSymbol(facts, { name: `${scope.className}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false });
+        const returns = scriptReturns(value, scope);
+        addSymbol(facts, { name: `${scope.className}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false, ...(returns ? { returns } : {}) });
       }
       const constructed = value?.type === "new_expression" ? value.childForFieldName("constructor") : null;
       const type = constructed?.type === "identifier" ? constructed.text : typeName(node.childForFieldName("type"));
@@ -374,7 +482,8 @@ function walkScript(node: Node, facts: FileFacts, scope: ScriptScope): void {
         const name = declarator.childForFieldName("name");
         const value = declarator.childForFieldName("value");
         if (scope.topLevel && name?.type === "identifier" && value && SCRIPT_FUNCTION_VALUES.has(value.type)) {
-          addSymbol(facts, { name: name.text, kind: "function", line: line(node), endLine: endLine(node), exported: scope.exported, isDefault: false });
+          const returns = scriptReturns(value, scope);
+          addSymbol(facts, { name: name.text, kind: "function", line: line(node), endLine: endLine(node), exported: scope.exported, isDefault: false, ...(returns ? { returns } : {}) });
         }
         if (declarator.type !== "variable_declarator" || !scriptDeclarator(declarator, facts, scope)) walkScript(declarator, facts, nested(scope));
       }
@@ -421,6 +530,18 @@ export function extractScript(root: Node, facts: FileFacts): void {
 interface PythonScope {
   topLevel: boolean;
   className: string | null;
+  /** First and last line of the innermost class that is a symbol, kept through its methods: where `self.x` means the same thing. */
+  classRange: [number, number] | null;
+  /** The class `self` belongs to in the method being walked. */
+  selfClass: string | null;
+  /** Last line of the innermost function, or of the file. */
+  scopeEnd: number;
+  /** The parameters of the method being walked whose class is written: `self.repo = repo` takes it from there. */
+  typed: Map<string, string>;
+  /** Inside a function or a lambda. Only there is a plain assignment a variable of its own: at the top of a file it rebinds a name of the module, which stays what its `def` or `import` made it. */
+  inFunction: boolean;
+  /** In the body of a class, down to the next function: what is assigned or defined there is an attribute, not a variable. */
+  classBody: boolean;
 }
 
 function pythonImportedName(node: Node): { name: string; alias: string | null } | null {
@@ -432,6 +553,113 @@ function pythonImportedName(node: Node): { name: string; alias: string | null } 
   return null;
 }
 
+/** `Foo` from `Foo`, `"Foo"` and `Optional[Foo]`. A dotted name, a union or a collection says nothing about one class. */
+function pythonTypeName(type: Node | null | undefined): string | null {
+  let inner = type?.type === "type" ? namedChildren(type)[0] : type;
+  if (inner?.type === "generic_type" && namedChildren(inner)[0]?.text === "Optional") {
+    const parameter = namedChildren(inner).find((child) => child.type === "type_parameter");
+    inner = parameter ? namedChildren(namedChildren(parameter)[0] ?? parameter)[0] : undefined;
+  }
+  const name = inner?.type === "identifier" ? inner.text : inner?.type === "string" ? unquote(inner.text) : null;
+  // A single capital letter is a type variable (`T`), not a class.
+  return name && /^[A-Za-z_]\w*$/.test(name) && !/^[A-Z]$/.test(name) && name !== "None" ? name : null;
+}
+
+/** The value under `await` and parentheses, and whether it was awaited. */
+function pythonAwaited(value: Node | null | undefined): { value: Node | null; awaited: boolean } {
+  let awaited = false;
+  let at = value ?? null;
+  while (at && (at.type === "await" || at.type === "parenthesized_expression")) {
+    if (at.type === "await") awaited = true;
+    at = namedChildren(at)[0] ?? null;
+  }
+  return { value: at, awaited };
+}
+
+/** A call written simply enough to say what is called: `f()`, `x.f()`, `self.x.f()`, and a method on the result of another such call. */
+function pythonCallRef(node: Node | null | undefined, depth = 0): CallRef | null {
+  if (node?.type !== "call" || depth > 8) return null;
+  const callee = node.childForFieldName("function");
+  const at = { line: line(node), column: column(node) };
+  if (callee?.type === "identifier") return { callee: callee.text, receiver: null, ...at };
+  if (callee?.type !== "attribute") return null;
+  const object = callee.childForFieldName("object");
+  const attribute = callee.childForFieldName("attribute");
+  if (!object || !attribute) return null;
+  if (object.type === "identifier") return { callee: attribute.text, receiver: object.text, ...at };
+  if (object.type === "attribute" && object.childForFieldName("object")?.text === "self") {
+    const field = object.childForFieldName("attribute");
+    return field ? { callee: attribute.text, receiver: `self.${field.text}`, ...at } : null;
+  }
+  const { value, awaited } = pythonAwaited(object);
+  const via = pythonCallRef(value, depth + 1);
+  return via ? { callee: attribute.text, receiver: "()", ...at, via: { ...via, ...(awaited ? { tried: true } : {}) } } : null;
+}
+
+/** The names a target binds: `x`, `a, b`, `(a, b)`, `*rest`. Attributes and subscripts bind no name. */
+function pythonTargets(target: Node | null | undefined): string[] {
+  if (!target) return [];
+  if (target.type === "identifier") return [target.text];
+  if (["pattern_list", "tuple_pattern", "list_pattern", "list_splat_pattern", "as_pattern_target"].includes(target.type)) return namedChildren(target).flatMap(pythonTargets);
+  return [];
+}
+
+function pythonParameters(fn: Node, facts: FileFacts, inMethod: boolean): Map<string, string> {
+  // A static method has no object as its first parameter.
+  const decorated = fn.parent?.type === "decorated_definition" ? namedChildren(fn.parent).filter((child) => child.type === "decorator") : [];
+  if (decorated.some((decorator) => /^@\s*staticmethod\b/.test(decorator.text))) inMethod = false;
+  const typed = new Map<string, string>();
+  const range = { line: line(fn), endLine: endLine(fn), column: column(fn) };
+  const list = fn.childForFieldName("parameters");
+  (list ? namedChildren(list) : []).forEach((parameter, index) => {
+    const named = parameter.type === "identifier" ? parameter : (parameter.childForFieldName("name") ?? namedChildren(parameter).find((child) => child.type === "identifier"));
+    if (!named) return;
+    // The first parameter of a method is the object itself, which calls on `self` already follow.
+    if (inMethod && index === 0 && parameter.type === "identifier") return;
+    const type = pythonTypeName(parameter.childForFieldName("type"));
+    if (type) typed.set(named.text, type);
+    if (type) facts.locals.push({ name: named.text, kind: "instance", type, ...range });
+    else facts.locals.push({ name: named.text, kind: "other", ...range });
+  });
+  return typed;
+}
+
+/**
+ * A field of a class holds one thing only if every `self.x = ...` in the class says the same.
+ * `self.stream = stream` in one method and `self.stream = ByteStream()` in another leave it open.
+ */
+function pythonSettleFields(facts: FileFacts): void {
+  const said = new Map<string, Set<string>>();
+  const keyOf = (local: FileFacts["locals"][number]) => `${local.name}\u0000${local.line}\u0000${local.endLine}`;
+  const fields = facts.locals.filter((local) => local.name.startsWith("self."));
+  for (const local of fields) {
+    const what = local.kind !== "instance" ? "?" : local.type ? `type ${local.type}` : `call ${local.from?.receiver ?? ""}.${local.from?.callee ?? ""}${local.from?.via ? " on a call" : ""}`;
+    const all = said.get(keyOf(local)) ?? new Set<string>();
+    said.set(keyOf(local), all);
+    all.add(what);
+  }
+  const kept = new Set<string>();
+  facts.locals = facts.locals.filter((local) => {
+    if (!local.name.startsWith("self.")) return true;
+    const key = keyOf(local);
+    if (kept.has(key)) return false;
+    kept.add(key);
+    if ((said.get(key)?.size ?? 0) > 1) {
+      local.kind = "other";
+      delete local.type;
+      delete local.from;
+    }
+    return true;
+  });
+}
+
+/** `x = None` and later `from m import y as x` in a function: from the import on, the name is what was imported again. */
+function pythonRebound(name: string, at: Node, facts: FileFacts): void {
+  for (const local of facts.locals) {
+    if (local.name === name && local.line <= line(at) && local.endLine >= line(at)) local.endLine = Math.max(local.line, line(at) - 1);
+  }
+}
+
 function walkPython(node: Node, facts: FileFacts, scope: PythonScope): void {
   switch (node.type) {
     case "import_statement": {
@@ -440,6 +668,7 @@ function walkPython(node: Node, facts: FileFacts, scope: PythonScope): void {
         if (!imported) continue;
         const local = imported.alias ?? imported.name;
         facts.imports.push({ specifier: imported.name, names: [{ local, imported: "*" }], reexport: false, star: false, line: line(node) });
+        pythonRebound(local, node, facts);
       }
       return;
     }
@@ -451,41 +680,64 @@ function walkPython(node: Node, facts: FileFacts, scope: PythonScope): void {
         const imported = child ? pythonImportedName(child) : null;
         if (imported) names.push({ local: imported.alias ?? imported.name, imported: imported.name });
       }
+      for (const name of names) pythonRebound(name.local, node, facts);
       const star = namedChildren(node).some((child) => child.type === "wildcard_import");
       facts.imports.push({ specifier: moduleName.text, names, reexport: false, star, line: line(node) });
       return;
     }
     case "function_definition": {
       const name = node.childForFieldName("name")?.text;
+      const written = pythonTypeName(node.childForFieldName("return_type"));
+      // What it says it returns; a coroutine gives that only once awaited. `Self` is the class around.
+      const isAsync = children(node).some((child) => child.type === "async");
+      const type = written === "Self" ? scope.className : written;
+      const returns = type ? { returns: (isAsync ? "?" : "") + type } : {};
+      const symbolName = name && scope.className ? `${scope.className}.${name}` : name && scope.topLevel ? name : null;
+      // `@overload` signatures and redefinitions are one symbol: when they return different things, nothing is said.
+      const earlier = symbolName ? facts.symbols.find((symbol) => symbol.name === symbolName) : undefined;
+      if (earlier && earlier.returns !== returns.returns) delete earlier.returns;
       if (name && scope.className) {
-        addSymbol(facts, { name: `${scope.className}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false });
+        addSymbol(facts, { name: `${scope.className}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false, ...returns });
       } else if (name && scope.topLevel) {
-        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: !name.startsWith("_"), isDefault: false });
+        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: !name.startsWith("_"), isDefault: false, ...returns });
+      } else if (name && scope.inFunction && !scope.classBody) {
+        // A function defined inside a function is a variable of it.
+        facts.locals.push({ name, kind: "other", line: line(node), endLine: scope.scopeEnd, column: column(node) });
       }
-      for (const child of namedChildren(node)) walkPython(child, facts, { topLevel: false, className: null });
+      const typed = pythonParameters(node, facts, scope.className !== null);
+      const inner: PythonScope = { topLevel: false, className: null, classRange: scope.classRange, selfClass: scope.className ?? null, scopeEnd: endLine(node), typed, inFunction: true, classBody: false };
+      for (const child of namedChildren(node)) walkPython(child, facts, inner);
+      return;
+    }
+    case "lambda": {
+      const range = { line: line(node), endLine: endLine(node), column: column(node) };
+      for (const parameter of namedChildren(node.childForFieldName("parameters") ?? node).filter((child) => child.type === "identifier")) {
+        if (node.childForFieldName("parameters")) facts.locals.push({ name: parameter.text, kind: "other", ...range });
+      }
+      for (const child of namedChildren(node)) walkPython(child, facts, { ...scope, topLevel: false, className: null, inFunction: true, classBody: false });
       return;
     }
     case "class_definition": {
       const name = node.childForFieldName("name")?.text;
       if (name && scope.topLevel) {
-        addSymbol(facts, { name, kind: "class", line: line(node), endLine: endLine(node), exported: !name.startsWith("_"), isDefault: false });
+        const parent = namedChildren(node.childForFieldName("superclasses") ?? node).find((child) => child.type === "identifier");
+        const extended = node.childForFieldName("superclasses") && parent ? { extends: parent.text } : {};
+        addSymbol(facts, { name, kind: "class", line: line(node), endLine: endLine(node), exported: !name.startsWith("_"), isDefault: false, ...extended });
         const body = node.childForFieldName("body");
+        const range: [number, number] = [line(node), endLine(node)];
         for (const child of namedChildren(node)) {
-          walkPython(child, facts, child.id === body?.id ? { topLevel: false, className: name } : { topLevel: false, className: null });
+          const inside = child.id === body?.id;
+          walkPython(child, facts, { topLevel: false, className: inside ? name : null, classRange: inside ? range : scope.classRange, selfClass: null, scopeEnd: scope.scopeEnd, typed: new Map(), inFunction: scope.inFunction, classBody: inside });
         }
         return;
       }
-      break;
+      // A class that is not a symbol (inside a function or another class) still has a body of attributes.
+      for (const child of namedChildren(node)) walkPython(child, facts, { ...scope, topLevel: false, className: null, selfClass: null, classBody: true });
+      return;
     }
     case "call": {
-      const callee = node.childForFieldName("function");
-      if (callee?.type === "identifier") {
-        facts.calls.push({ callee: callee.text, receiver: null, line: line(node) });
-      } else if (callee?.type === "attribute") {
-        const object = callee.childForFieldName("object");
-        const attribute = callee.childForFieldName("attribute");
-        if (object?.type === "identifier" && attribute) facts.calls.push({ callee: attribute.text, receiver: object.text, line: line(node) });
-      }
+      const call = pythonCallRef(node);
+      if (call) facts.calls.push(call);
       break;
     }
     case "assignment": {
@@ -494,6 +746,58 @@ function walkPython(node: Node, facts: FileFacts, scope: PythonScope): void {
       if (left?.text === "__tablename__" && right?.type === "string") {
         facts.tables.push({ name: unquote(right.text).toLowerCase(), op: "define", line: line(node) });
       }
+      const type = pythonTypeName(node.childForFieldName("type"));
+      const made = pythonAwaited(right);
+      const call = type ? null : pythonCallRef(made.value);
+      const from = call ? { from: { ...call, ...(made.awaited ? { tried: true } : {}) } } : null;
+      // A name declared in a class body is a class attribute, not a variable of the methods.
+      if (left?.type === "identifier" && !scope.classBody) {
+        // The name means this from the end of the statement on: `x = x.next()` still reads the old one.
+        const range = { line: endLine(node), endLine: Math.max(endLine(node), scope.scopeEnd), column: node.endPosition.column };
+        if (type) facts.locals.push({ name: left.text, kind: "instance", type, ...range });
+        else if (from) facts.locals.push({ name: left.text, kind: "instance", ...from, ...range });
+        else if (scope.inFunction) facts.locals.push({ name: left.text, kind: "other", ...range });
+      } else if (left?.type === "attribute" && left.childForFieldName("object")?.text === "self" && scope.classRange && scope.selfClass) {
+        // `self.store = Store()` in a method: what `self.store` is, for the whole class.
+        const field = left.childForFieldName("attribute")?.text;
+        const range = { line: scope.classRange[0], endLine: scope.classRange[1] };
+        // `self.repo = repo` where the parameter is `repo: Repo`.
+        const passed = type ?? (right?.type === "identifier" ? (scope.typed.get(right.text) ?? null) : null);
+        if (field && passed) facts.locals.push({ name: `self.${field}`, kind: "instance", type: passed, ...range });
+        else if (field && from) facts.locals.push({ name: `self.${field}`, kind: "instance", ...from, ...range });
+        // Anything else but `None` is something that cannot be told, which also unsettles what other places say.
+        else if (field && right?.type !== "none") facts.locals.push({ name: `self.${field}`, kind: "other", ...range });
+      } else if (left) {
+        const range = { line: endLine(node), endLine: Math.max(endLine(node), scope.scopeEnd), column: node.endPosition.column };
+        if (scope.inFunction && !scope.classBody) for (const name of pythonTargets(left)) facts.locals.push({ name, kind: "other", ...range });
+        // `self.a, self.b = pair`: each field gets something that cannot be told.
+        if (scope.classRange && scope.selfClass) {
+          for (const target of left.descendantsOfType("attribute")) {
+            const field = target?.childForFieldName("object")?.text === "self" ? target.childForFieldName("attribute")?.text : undefined;
+            if (field) facts.locals.push({ name: `self.${field}`, kind: "other", line: scope.classRange[0], endLine: scope.classRange[1] });
+          }
+        }
+      }
+      break;
+    }
+    case "named_expression": {
+      // `if (row := fetch()):` binds `row` from here on.
+      const name = node.childForFieldName("name");
+      if (name?.type === "identifier" && scope.inFunction && !scope.classBody) {
+        facts.locals.push({ name: name.text, kind: "other", line: line(node), endLine: Math.max(endLine(node), scope.scopeEnd), column: column(node) });
+      }
+      break;
+    }
+    case "for_statement":
+    case "for_in_clause":
+    case "as_pattern": {
+      // `for item in items`, `with open(p) as fh`, `except Error as e`, `case Row() as row`: the name holds
+      // something the loop or the block gives it. In a comprehension it lives no longer than the comprehension,
+      // which also covers the element written before the `for`.
+      const target = node.type === "as_pattern" ? node.childForFieldName("alias") : node.childForFieldName("left");
+      const holder = node.type === "for_in_clause" ? (node.parent ?? node) : node;
+      const range = { line: line(holder), endLine: node.type === "for_in_clause" ? endLine(holder) : Math.max(endLine(node), scope.scopeEnd), column: column(holder) };
+      if (scope.inFunction && !scope.classBody) for (const name of pythonTargets(target)) facts.locals.push({ name, kind: "other", ...range });
       break;
     }
     case "string":
@@ -503,13 +807,15 @@ function walkPython(node: Node, facts: FileFacts, scope: PythonScope): void {
       break;
   }
 
-  const passesScope = node.type === "module" || node.type === "decorated_definition" || (node.type === "block" && scope.className !== null);
-  const inner = passesScope ? scope : node.type === "block" || node.type === "if_statement" || node.type === "try_statement" ? { ...scope, className: null } : { topLevel: false, className: null };
+  // A statement is where its block is: `rows: list = field()` in a class body declares an attribute, not a variable of the file.
+  const passesScope = node.type === "module" || node.type === "decorated_definition" || node.type === "expression_statement" || (node.type === "block" && scope.className !== null);
+  const inner = passesScope ? scope : node.type === "block" || node.type === "if_statement" || node.type === "try_statement" ? { ...scope, className: null } : { ...scope, topLevel: false, className: null };
   for (const child of namedChildren(node)) walkPython(child, facts, inner);
 }
 
 export function extractPython(root: Node, facts: FileFacts): void {
-  walkPython(root, facts, { topLevel: true, className: null });
+  walkPython(root, facts, { topLevel: true, className: null, classRange: null, selfClass: null, scopeEnd: endLine(root), typed: new Map(), inFunction: false, classBody: false });
+  pythonSettleFields(facts);
 }
 
 // ---------- Go ----------

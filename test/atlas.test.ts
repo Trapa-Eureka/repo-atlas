@@ -48,6 +48,7 @@ describe("Atlas on the sample repository", () => {
     const atlas = await Atlas.open(root);
     expect(relation(atlas.context("handleOrder"), "calls")).toEqual([
       "sym:src/orders/service.ts#OrderService",
+      "sym:src/orders/service.ts#OrderService.place",
       "sym:src/orders/service.ts#recentOrders",
       "sym:src/users/repo.ts#createUser",
       "sym:src/users/repo.ts#findUser",
@@ -119,7 +120,7 @@ describe("Atlas on the sample repository", () => {
     const atlas = await Atlas.open(root);
     const page = atlas.view({ focus: "users" });
     atlas.close();
-    expect(page).toMatchObject({ nodes: 94, edges: 152 });
+    expect(page).toMatchObject({ nodes: 94, edges: 154 });
     expect(page.html).not.toMatch(/(?:src|href)=["']?https?:/);
     const embedded = /window\.ATLAS = (.*);<\/script>/.exec(page.html)?.[1] ?? "";
     const data = JSON.parse(embedded) as { nodes: unknown[][]; edges: number[][]; edgeKinds: string[]; focus: string };
@@ -181,12 +182,12 @@ describe("CLI", () => {
     const result = await atlas("view", "--focus", "findUser");
     expect(result.code).toBe(0);
     expect(result.out).toBe(`${join(root, ".atlas", "view.html")}\n`);
-    expect(result.err).toContain("94 nodes and 152 relations");
+    expect(result.err).toContain("94 nodes and 154 relations");
     expect(readFileSync(join(root, ".atlas", "view.html"), "utf8")).toContain('"focus":"sym:src/users/repo.ts#findUser"');
 
     const elsewhere = join(root, "graph.html");
     const json = await atlas("--json", "view", "--out", elsewhere);
-    expect(JSON.parse(json.out)).toEqual({ file: elsewhere, nodes: 94, edges: 152 });
+    expect(JSON.parse(json.out)).toEqual({ file: elsewhere, nodes: 94, edges: 154 });
     expect(readFileSync(elsewhere, "utf8").startsWith("<!doctype html>")).toBe(true);
   });
 
