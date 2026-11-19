@@ -11,8 +11,8 @@ export interface PathAlias {
   exact: boolean;
   /** Repository-relative path prefixes the rest of the specifier is appended to. */
   targets: string[];
-  /** Set for a Go module path: it names a folder (a package), and only Go files import through it. */
-  language?: "go";
+  /** Set for a Go module path or a Rust crate name: it names a folder, and only files of that language import through it. */
+  language?: "go" | "rust";
 }
 
 export interface LinkOptions {
@@ -116,6 +116,8 @@ class Linker {
   /** Java: fully qualified name → where the type is declared. A name can be declared in several source roots. */
   private readonly javaTypes = new Map<string, Declared[]>();
   private readonly javaPackages = new Set<string>();
+  private readonly rustRoots = new Map<string, { dir: string; file: string }>();
+  private readonly rustItems = new Map<string, { facts: FileFacts; name: string } | null>();
   private readonly aliases: PathAlias[];
 
   private readonly files: FileFacts[];
@@ -485,7 +487,238 @@ class Linker {
     }
   }
 
+  // ---------- Rust ----------
+
+  private has(path: string): boolean {
+    return this.byPath.has(path);
+  }
+
+  /**
+   * The crate a Rust file belongs to, as the folder and the file of its root. `lib.rs` and `main.rs`
+   * are each a root; where both exist, a module belongs to the one that declares it with `mod`.
+   * Files directly in `tests/`, `examples/`, `benches/` or `src/bin/` are crates of their own,
+   * unless that folder is itself a module (`mod.rs`, or a file named after it).
+   */
+  private rustRoot(path: string): { dir: string; file: string } {
+    const cached = this.rustRoots.get(path);
+    if (cached) return cached;
+    const own = folderOf(path);
+    const name = posix.basename(path);
+    let root = { dir: own, file: path };
+    const entries = (dir: string) => ["lib.rs", "main.rs"].map((entry) => (dir ? `${dir}/${entry}` : entry)).filter((candidate) => this.has(candidate));
+    const isModule = (dir: string) => entries(dir).length > 0 || this.has(`${dir}/mod.rs`) || this.has(`${dir}.rs`);
+    const standalone = /^(?:tests|examples|benches|bin)$/.test(posix.basename(own)) && name !== "mod.rs" && !isModule(own);
+    if (name !== "lib.rs" && name !== "main.rs" && !standalone) {
+      for (let dir = own; ; dir = folderOf(dir)) {
+        const found = entries(dir);
+        if (found.length > 0) {
+          // The first folder (or file) below the root says which module of the crate this file is part of.
+          const top = path.slice(dir ? dir.length + 1 : 0).split("/")[0]?.replace(/\.rs$/, "");
+          const declaring = found.find((entry) => this.byPath.get(entry)?.imports.some((fact) => fact.specifier === `self::${top}`));
+          root = { dir, file: declaring ?? found[0] ?? path };
+          break;
+        }
+        if (dir === "") break;
+      }
+    }
+    this.rustRoots.set(path, root);
+    return root;
+  }
+
+  /** The folder that holds the child modules of a Rust file: its own folder for `mod.rs` and a crate root, else a folder named after it. */
+  private rustModuleDir(path: string): string {
+    const name = posix.basename(path);
+    if (name === "mod.rs" || path === this.rustRoot(path).file) return folderOf(path);
+    const own = folderOf(path);
+    return (own ? `${own}/` : "") + name.replace(/\.rs$/, "");
+  }
+
+  /** The file of the module whose children live in `dir`, in the crate with this root. */
+  private rustModuleFile(dir: string, root: { dir: string; file: string }): string | null {
+    if (dir === root.dir) return root.file;
+    return [`${dir}.rs`, `${dir}/mod.rs`].find((candidate) => this.has(candidate)) ?? null;
+  }
+
+  /** Follows module path segments down from a module folder, as far as files go. What is left names items inside the file reached: `own` when no segment is a file. */
+  private rustWalk(dir: string, segments: string[], own: string | null): { facts: FileFacts; rest: string[] } | null {
+    const under = (parts: string[]) => [dir, ...parts].filter(Boolean).join("/");
+    for (let count = segments.length; count > 0; count--) {
+      const base = under(segments.slice(0, count));
+      const file = [`${base}.rs`, `${base}/mod.rs`].find((candidate) => this.has(candidate));
+      const facts = file ? this.byPath.get(file) : undefined;
+      if (facts) return { facts, rest: segments.slice(count) };
+    }
+    const facts = own ? this.byPath.get(own) : undefined;
+    return facts ? { facts, rest: segments } : null;
+  }
+
+  /**
+   * Where a Rust path leads from `from`: a file of the repository plus the item path left over,
+   * the name of an outside crate, or null for a path of this repository that leads nowhere.
+   */
+  private rustResolve(from: FileFacts, segments: string[], depth = 0, viaGlobs = true): { facts: FileFacts; rest: string[] } | { external: string } | null {
+    const [first, ...rest] = segments;
+    if (first === undefined || depth > MAX_REEXPORT_HOPS + 2) return null;
+    const root = this.rustRoot(from.path);
+    if (first === "crate") return this.rustWalk(root.dir, rest, root.file);
+    if (first === "self") return this.rustWalk(this.rustModuleDir(from.path), rest, from.path);
+    if (first === "super") {
+      let dir = folderOf(this.rustModuleDir(from.path));
+      let left = rest;
+      while (left[0] === "super") {
+        dir = folderOf(dir);
+        left = left.slice(1);
+      }
+      return this.rustWalk(dir, left, this.rustModuleFile(dir, root));
+    }
+    // A name the file brought in with `use` or `mod`, written out in full and resolved again.
+    // (`use anyhow::anyhow` binds a name that its own path starts with: that path is not rewritten by itself.)
+    const binding = from.imports.find((fact) => !fact.star && fact.names[0]?.local === first && fact.specifier.split("::")[0] !== first);
+    if (binding) return this.rustResolve(from, [...binding.specifier.split("::"), ...rest], depth + 1, viaGlobs);
+    if (this.rustDeclares(from, first)) return { facts: from, rest: segments };
+    const crate = this.aliases.find((alias) => alias.language === "rust" && alias.prefix === first);
+    if (crate) {
+      const lib = [crate.targets[0], crate.targets[1]].filter(Boolean).join("/");
+      return this.rustWalk(folderOf(lib), rest, lib);
+    }
+    // A type that came in through a glob (`use super::*; use Kind::*;`). Crate names are lower case,
+    // so a capitalised name that cannot be placed is an item, never an outside crate.
+    const item = viaGlobs ? this.rustItem(from, first, true) : null;
+    if (item) return { facts: item.facts, rest: [item.name, ...rest] };
+    return /^[A-Z]/.test(first) ? { facts: from, rest: segments } : { external: first };
+  }
+
+  /** Whether a Rust file itself declares the name: a symbol, or an inline module, constant, static or macro. */
+  private rustDeclares(facts: FileFacts, name: string): boolean {
+    return this.symbols.get(facts.path)?.has(name) === true || facts.exports.some((declared) => declared.exported === name);
+  }
+
+  /** Whether `inner` is `outer` or a module below it: private items of a module are visible from there. */
+  private rustInside(inner: FileFacts, outer: FileFacts): boolean {
+    return inner === outer || inner.path.startsWith(`${this.rustModuleDir(outer.path)}/`);
+  }
+
+  /**
+   * An item of a Rust file by name: one of its own, or one it passes on with `pub use` (any `use`,
+   * when asked from inside the file). Each file is looked into once per question, so modules that
+   * glob-import each other cost no more than their number.
+   */
+  private rustItem(facts: FileFacts, name: string, inside = false): { facts: FileFacts; name: string } | null {
+    const key = `${facts.path}\u0000${name}\u0000${inside ? 1 : 0}`;
+    const cached = this.rustItems.get(key);
+    if (cached !== undefined) return cached;
+    const found = this.rustSearch(facts, name, inside, facts, new Set());
+    this.rustItems.set(key, found);
+    return found;
+  }
+
+  private rustSearch(facts: FileFacts, name: string, inside: boolean, asker: FileFacts, seen: Set<string>): { facts: FileFacts; name: string } | null {
+    const symbol = this.symbols.get(facts.path)?.get(name);
+    if (symbol && (symbol.exported || this.rustInside(asker, facts))) return { facts, name };
+    // An inline module, constant, static or macro: not a symbol, but it is where the name ends up.
+    if (!symbol && facts.exports.some((declared) => declared.exported === name)) return { facts, name };
+    const key = `${facts.path}\u0000${name}`;
+    if (seen.has(key) || seen.size > 2000) return null;
+    seen.add(key);
+    // A plain `use` is private to its module, which includes every module below it.
+    const visible = inside || this.rustInside(asker, facts);
+    for (const fact of facts.imports) {
+      if (!visible && !fact.reexport) continue;
+      if (!fact.star && fact.names[0]?.local !== name) continue;
+      const target = this.rustResolve(facts, fact.specifier.split("::"), 0, false);
+      if (!target || "external" in target || target.rest.length > (fact.star ? 0 : 1)) continue;
+      if (target.facts === facts && target.rest.length === 0) continue;
+      const found = this.rustSearch(target.facts, fact.star ? name : (target.rest[0] ?? name), false, asker, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** The type a name or path written in `from` stands for. */
+  private rustType(from: FileFacts, written: string): { facts: FileFacts; name: string } | null {
+    const segments = written.split("::").filter(Boolean);
+    if (segments.length === 1) return this.rustItem(from, written, true);
+    const target = this.rustResolve(from, segments);
+    return target && !("external" in target) && target.rest.length === 1 ? this.rustItem(target.facts, target.rest[0] ?? "", target.facts === from) : null;
+  }
+
+  /** A method of a Rust type: from an `impl` in the file that declares it or in the calling file, or from a trait implemented for it. */
+  private rustMethod(type: { facts: FileFacts; name: string } | null, method: string, from: FileFacts): string | null {
+    if (!type) return null;
+    const own = `${type.name}.${method}`;
+    for (const facts of [type.facts, from]) if (this.symbols.get(facts.path)?.has(own)) return symbolId(facts.path, own);
+    for (const trait of this.symbols.get(type.facts.path)?.get(type.name)?.embeds ?? []) {
+      const declared = this.rustType(type.facts, trait);
+      if (declared && this.symbols.get(declared.facts.path)?.has(`${declared.name}.${method}`)) return symbolId(declared.facts.path, `${declared.name}.${method}`);
+    }
+    return null;
+  }
+
+  /** Whether a local that got its type from `let x = T::name()` really holds a `T`: `name` must return one, in the way the `let` took it (`?` or not). */
+  private rustConstructed(facts: FileFacts, local: LocalFact, type: { facts: FileFacts; name: string } | null): boolean {
+    if (!local.via || !type) return true;
+    const tried = local.via.startsWith("?");
+    const constructor = this.symbols.get(type.facts.path)?.get(`${type.name}.${local.via.replace(/^\?/, "")}`) ?? this.symbols.get(facts.path)?.get(`${type.name}.${local.via.replace(/^\?/, "")}`);
+    // A constructor we cannot see (a derived `default`, an `impl` elsewhere) is trusted only by its conventional name.
+    if (!constructor?.returns) return /^\??(?:new|default)$/.test(local.via);
+    return constructor.returns === (tried ? `?${type.name}` : type.name);
+  }
+
+  private rustCall(facts: FileFacts, call: FileFacts["calls"][number], caller: SymbolFact | null): string | null {
+    const implType = caller?.name.includes(".") ? (caller.name.split(".")[0] ?? null) : null;
+    const typeOf = (written: string) => (written === "Self" && implType ? (this.rustType(facts, implType) ?? { facts, name: implType }) : this.rustType(facts, written));
+    const functionId = (item: { facts: FileFacts; name: string } | null) => {
+      const id = item ? symbolId(item.facts.path, item.name) : null;
+      // `Wrapper(x)` builds a tuple struct; it is not a call of a function.
+      return id && this.nodes.get(id)?.detail === "function" ? id : null;
+    };
+    if (call.receiver === null) {
+      return this.local(facts, call.callee, call.line, call.column) ? null : functionId(this.rustItem(facts, call.callee, true));
+    }
+    if (call.receiver.endsWith("::")) {
+      const path = call.receiver.slice(0, -2).split("::").filter(Boolean);
+      if (path[0] === "Self" && implType) path[0] = implType;
+      const target = this.rustResolve(facts, [...path, call.callee]);
+      if (!target || "external" in target) return null;
+      if (target.rest.length === 1) return functionId(this.rustItem(target.facts, call.callee, target.facts === facts));
+      // `Type::method()`, with the type possibly passed on by the module it was reached through.
+      return target.rest.length === 2 ? this.rustMethod(this.rustItem(target.facts, target.rest[0] ?? "", target.facts === facts), call.callee, facts) : null;
+    }
+    const [receiver, field] = call.receiver.split(".");
+    const local = receiver ? this.local(facts, receiver, call.line, call.column) : null;
+    if (local?.kind !== "instance" || !local.type) return null;
+    const type = typeOf(local.type);
+    if (!this.rustConstructed(facts, local, type)) return null;
+    if (field === undefined) return this.rustMethod(type, call.callee, facts);
+    const fieldType = type ? this.symbols.get(type.facts.path)?.get(type.name)?.fields?.[field] : undefined;
+    return type && fieldType ? this.rustMethod(this.rustType(type.facts, fieldType), call.callee, facts) : null;
+  }
+
+  /** A Rust file depends on the file each `use` and `mod` leads to: the one that declares the item when that can be told, else the module's file. */
+  private addRustImports(facts: FileFacts): void {
+    const from = fileId(facts.path);
+    for (const fact of facts.imports) {
+      const target = this.rustResolve(facts, fact.specifier.split("::"));
+      if (target && "external" in target) {
+        this.edge(from, this.node({ id: moduleId(target.external), kind: "module", name: target.external, file: null, line: null, detail: "rust" }), "imports", fact.line);
+        continue;
+      }
+      const first = target?.rest[0];
+      const item = target && first !== undefined && !fact.star ? this.rustItem(target.facts, first, target.facts === facts) : null;
+      // A path of the crate that reaches no file and names nothing its starting module declares or passes on
+      // leads nowhere: `mod gone;`, `use crate::gone::Thing`. Once a file is reached, an item we cannot see
+      // in it may still come from a macro, so the file is depended on and nothing is reported.
+      const path = fact.specifier.split("::");
+      const start = path.findIndex((segment) => segment !== "crate" && segment !== "self" && segment !== "super");
+      const reachedNoFile = target !== null && start > 0 && target.rest.length === path.length - start;
+      const leadsNowhere = !target || (reachedNoFile && first !== undefined && !item && !this.rustDeclares(target.facts, first));
+      if (leadsNowhere) this.unresolved.push({ file: facts.path, specifier: fact.specifier, line: fact.line });
+      else if (target) this.edge(from, fileId((item ?? target).facts.path), "imports", fact.line);
+    }
+  }
+
   private addImports(facts: FileFacts): void {
+    if (facts.language === "rust") return this.addRustImports(facts);
     if (facts.language === "go") return this.addGoImports(facts);
     if (facts.language === "java") return this.addJavaImports(facts);
     const python = facts.language === "python";
@@ -644,6 +877,8 @@ class Linker {
         target = this.goCall(facts, call);
       } else if (facts.language === "java") {
         target = this.javaCall(facts, call);
+      } else if (facts.language === "rust") {
+        target = this.rustCall(facts, call, caller);
       } else if (call.receiver === null) {
         // `const { parse } = db; parse()` is a call of `db.parse`.
         // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.

@@ -24,11 +24,11 @@ It is built for teams that maintain a large codebase and for people who work wit
 
 ### What it looks like
 
-Every picture below is real output, captured from `fixtures/shop`, the small sample repository in this repo (TypeScript, TSX, Python, Go, Java, SQL, Markdown). The only edit: the long folder path was shortened to `~/shop`.
+Every picture below is real output, captured from `fixtures/shop`, the small sample repository in this repo (TypeScript, TSX, Python, Go, Java, Rust, SQL, Markdown). The only edit: the long folder path was shortened to `~/shop`.
 
 **Index a repository** (Phases 1 and 2). The second run parses nothing, because no file changed:
 
-<img src="assets/index.png" alt="Terminal: atlas index parses 20 files into 65 nodes and 109 edges, a second run parses 0 files, and atlas stats lists nodes, edges, languages and the most depended-on files" width="720">
+<img src="assets/index.png" alt="Terminal: atlas index parses 23 files into 77 nodes and 126 edges, a second run parses 0 files, and atlas stats lists nodes, edges, languages and the most depended-on files" width="720">
 
 **A briefing before editing a file** (Phase 3). What it defines and uses, who uses it, the tables it touches, the docs that mention it:
 
@@ -81,11 +81,11 @@ flowchart LR
 
 | Feature                                                                                                                                                  | Status  |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `atlas index`: tree-sitter extraction for TypeScript, TSX, JavaScript, Python, Go and Java                                                               | Done    |
+| `atlas index`: tree-sitter extraction for TypeScript, TSX, JavaScript, Python, Go, Java and Rust                                                         | Done    |
 | SQL tables: `.sql` files and SQL inside string literals, split into defined / read / written                                                             | Done    |
-| Env keys: `process.env.X`, `import.meta.env.X`, `os.environ`, `os.getenv`, `os.Getenv`, `System.getenv`, and keys declared in `.env.example`                                           | Done    |
+| Env keys: `process.env.X`, `import.meta.env.X`, `os.environ`, `os.getenv`, `os.Getenv`, `System.getenv`, `env::var` / `env!`, and keys declared in `.env.example`                                           | Done    |
 | Docs: Markdown links and backticked names that point at files, functions, tables or env keys                                                             | Done    |
-| Import resolution: relative paths, `.js`→`.ts`, index files, tsconfig `paths` / `baseUrl`, workspace package names, Python packages and relative imports, Go module paths (`go.mod`), Java packages| Done    |
+| Import resolution: relative paths, `.js`→`.ts`, index files, tsconfig `paths` / `baseUrl`, workspace package names, Python packages and relative imports, Go module paths (`go.mod`), Java packages, Rust modules and crates (`Cargo.toml`)| Done    |
 | Call resolution through named, default and namespace imports, barrel re-exports, `this` / `self`, JSX components                                         | Done    |
 | Incremental indexing: only changed files are re-parsed; every query refreshes the index first                                                            | Done    |
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, each with `--json`                                                                  | Done    |
@@ -94,7 +94,7 @@ flowchart LR
 | `atlas mcp`: MCP server (stdio) with six tools; `atlas init` registers it in `.mcp.json`                                                                 | Done    |
 | Local SQLite index (built-in `node:sqlite`, nothing to compile)                                                                                          | Done    |
 | Published npm package (`repo-atlas-cli`)                                                                                                                 | Done    |
-| More languages (Rust, Ruby:       the grammars already ship with the dependency)                                                                         | Planned |
+| More languages (Ruby:             the grammars already ship with the dependency)                                                                         | Planned |
 | IDE integration                                                                                                                                          | Planned |
 | Paid plans: hosted indexing of private repositories, shared team graph, CI integration                                                                   | Planned |
 
@@ -114,6 +114,7 @@ flowchart LR
 | Python                  | `.py`                                                 | functions, classes, methods; `import` / `from … import`; calls; `__tablename__`                                            |
 | Go                      | `.go`                                                 | functions, methods, types; imports resolved through `go.mod`; calls, also on typed values and struct fields |
 | Java                    | `.java`                                               | classes, interfaces, enums, records and their methods; imports and same-package use; calls through fields, parameters and inheritance; `@Table` |
+| Rust                    | `.rs`                                                 | functions, structs, enums, traits and `impl` methods; `mod` and `use` paths, globs, `pub use`; calls by path, on typed values and inside macros |
 | SQL                     | `.sql`, and SQL in code strings                       | `CREATE` / `ALTER` / `INSERT` / `UPDATE` / `DELETE` / `FROM` / `JOIN` / `REFERENCES`, plus `.from("table")` query builders |
 | Config                  | `.env.example`, `.env.sample`, `.env.template`        | key names only, never values. Real `.env` files are never opened.                                                          |
 | Docs                    | `.md` `.mdx`                                          | relative links and `` `backticked` `` names                                                                                |
@@ -237,6 +238,7 @@ Each tool call first re-indexes changed files, so the answers match the working 
 - tsconfig `extends` is not followed, and `package.json` `exports` maps are not read; workspace packages are resolved to `src/index`, `index` or their `main` file.
 - **Go: a folder is a package.** An import of a package inside the repository becomes edges to the files that declare what the importer uses (a constant, a function, or a type together with the files holding its methods; all of the package's files when a name cannot be placed). Methods are followed on values whose type is written (parameters, receivers, `var x T`, `x := T{}`, struct fields, embedded types), not on the result of a call (`x := NewT()`) or through an interface. A type conversion (`ID(x)`) is not a call. Build tags are ignored, so two files that declare the same name for different platforms are not told apart, and `vendor/` folders written by `go mod vendor` are skipped. Checked on four public Go repositories (gin, cobra, miniflux, pocketbase: 1,037 Go files): 86 sampled edges were all correct and no local import was left unresolved; missing edges were not measured for Go.
 - **Java: a class is found by its package and name**, wherever its file is. A file depends on the file of every class it names, imported or not, since classes of the same package need no import. Methods are followed on fields, parameters and locals by their declared type, through superclasses and interfaces, and for static calls (`Labels.format()`); a call on an interface-typed value links to the interface's method, not to its implementations. Not followed: the result of a call (`a.b().c()`), overloads (all share one symbol), calls with no receiver inside an anonymous class, reflection, and annotation-driven wiring. `@Table(name = ...)` defines a table; a non-native `@Query` is JPQL and is not read as SQL. Checked on four public Java repositories (spring-petclinic, gson, jsoup, commons-lang: 1,181 Java files): of 103 sampled edges one was wrong (a JPQL entity name read as a table) and has been fixed; missing edges were not measured for Java.
+- **Rust: paths are followed through the module tree.** `mod x;` and every `use` become edges to the file the path leads to (the file that declares the item, when `pub use` passes it on), across `crate::`, `self::`, `super::`, globs and other crates of the repository named in a `Cargo.toml`. Calls are followed by path (`a::b::f()`, `Type::new()`), on `self`, on `self.field`, and on a value whose type is written: a typed parameter, `let x: T`, `let x = T { .. }`, or `let x = T::open()` where `open` returns a `T` (with `?` when it returns a `Result` or an `Option` of one). A method comes from an `impl` in the type's file or the calling file, or from a trait implemented for the type in its own file. Not followed: values whose type is inferred any other way, generics beyond a single trait bound, `impl` blocks in a third file, macros that define items, and `#[path]` or `cfg` attributes. Items of an inline `mod name { }` are named as if they were at the top of the file, and of two `impl` blocks that define the same method name for one type only the first is kept. Inside a macro only `name(...)` and `path::name(...)` calls are seen. Checked on four public Rust repositories (fd, mini-redis, ripgrep, just: 432 Rust files): 102 sampled edges were all correct and no `use` was left unresolved; missing edges were not measured for Rust.
 - A Python absolute import is matched from the repository root, then by a unique path suffix. Two packages with the same module path are left unresolved.
 - Docs are linked only through relative links and backticked names. A backticked common word that happens to be the only function of that name will be linked; this is the least reliable kind of edge (see the numbers below).
 - Only top-level functions, classes and their methods (including arrow functions assigned to class properties) are symbols. Nested functions are attributed to the function that contains them, and the members of a plain object are not symbols.
@@ -314,7 +316,8 @@ TypeScript (ESM) on Node.js 22+ · [web-tree-sitter](https://github.com/tree-sit
   - [ ] more languages
     - [x] Go
     - [x] Java
-    - [ ] Rust, Ruby
+    - [x] Rust
+    - [ ] Ruby
   - [x] local HTML viewer (`atlas view`)
   - [ ] IDE integration
 - [ ] **Phase 6**: paid plans: hosted private-repository indexing, shared team graph, CI integration (planned)

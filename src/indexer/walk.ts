@@ -12,7 +12,7 @@ const IGNORED_WITHOUT_GIT = new Set([
   ...ALWAYS_IGNORED, "dist", "build", "out", "coverage", "vendor", "target",
   ".next", ".nuxt", ".turbo", ".cache", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
 ]);
-const PROJECT_CONFIGS = new Set(["tsconfig.json", "jsconfig.json", "package.json", "go.mod"]);
+const PROJECT_CONFIGS = new Set(["tsconfig.json", "jsconfig.json", "package.json", "go.mod", "Cargo.toml"]);
 
 export interface WalkedFile {
   path: string;
@@ -22,7 +22,7 @@ export interface WalkedFile {
 
 export interface WalkResult {
   files: WalkedFile[];
-  /** tsconfig.json / jsconfig.json / package.json / go.mod paths, used only to resolve import aliases. */
+  /** tsconfig.json / jsconfig.json / package.json / go.mod / Cargo.toml paths, used only to resolve import aliases. */
   configs: string[];
   skippedLarge: number;
 }

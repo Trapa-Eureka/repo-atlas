@@ -29,6 +29,8 @@ const GO_ENV = [new RegExp(`\\bos\\.(?:Getenv|LookupEnv)\\(\\s*["\`]${ENV_NAME}[
 
 const JAVA_ENV = [new RegExp(`\\bSystem\\.getenv\\(\\s*"${ENV_NAME}"`, "g")];
 
+const RUST_ENV = [new RegExp(`\\benv::var(?:_os)?\\(\\s*"${ENV_NAME}"`, "g"), new RegExp(`\\b(?:option_)?env!\\(\\s*"${ENV_NAME}"`, "g")];
+
 function lineOf(source: string, offset: number): number {
   let line = 1;
   for (let i = source.indexOf("\n"); i !== -1 && i < offset; i = source.indexOf("\n", i + 1)) line++;
@@ -37,7 +39,7 @@ function lineOf(source: string, offset: number): number {
 
 /** Where each env key is first used, as an offset into `source`. */
 export function envMatches(source: string, language: Language): { name: string; offset: number }[] {
-  const patterns = language === "python" ? pythonPatterns(source) : language === "go" ? GO_ENV : language === "java" ? JAVA_ENV : SCRIPT_ENV;
+  const patterns = language === "python" ? pythonPatterns(source) : language === "go" ? GO_ENV : language === "java" ? JAVA_ENV : language === "rust" ? RUST_ENV : SCRIPT_ENV;
   const found: { name: string; offset: number }[] = [];
   for (const re of patterns) {
     for (const match of source.matchAll(re)) if (match[1]) found.push({ name: match[1], offset: match.index });

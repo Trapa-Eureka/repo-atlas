@@ -1,6 +1,6 @@
 import { basename, extname } from "node:path";
 import type { Node } from "web-tree-sitter";
-import { extractGo, extractJava, extractPython, extractScript } from "./code.js";
+import { extractGo, extractJava, extractPython, extractRust, extractScript } from "./code.js";
 import { emptyFacts, type FileFacts, type Language, type TableFact } from "./facts.js";
 import { parserFor, type Grammar } from "./parser.js";
 import { cteNamesIn, tablesInSql } from "./sql.js";
@@ -9,7 +9,7 @@ import { envDeclarations, envUses, markdownRefs } from "./text.js";
 export type { CallFact, DocRefFact, EnvFact, ExportFact, FileFacts, ImportFact, ImportedName, Language, LocalFact, SymbolFact, TableFact } from "./facts.js";
 
 /** Bump when extraction output changes, so existing indexes re-parse every file. */
-export const EXTRACTOR_VERSION = 5;
+export const EXTRACTOR_VERSION = 6;
 
 const BY_EXTENSION: Record<string, Language> = {
   ".ts": "typescript",
@@ -23,6 +23,7 @@ const BY_EXTENSION: Record<string, Language> = {
   ".py": "python",
   ".go": "go",
   ".java": "java",
+  ".rs": "rust",
   ".sql": "sql",
   ".md": "markdown",
   ".mdx": "markdown",
@@ -66,6 +67,7 @@ async function extractCode(source: string, facts: FileFacts, grammar: Grammar): 
   try {
     if (grammar === "go") extractGo(tree.rootNode, facts);
     else if (grammar === "java") extractJava(tree.rootNode, facts);
+    else if (grammar === "rust") extractRust(tree.rootNode, facts);
     else if (grammar === "python") extractPython(tree.rootNode, facts);
     else extractScript(tree.rootNode, facts);
     // `process.env.X` in a test title or a comment is a mention, not a use.
@@ -87,6 +89,7 @@ export async function extractFile(path: string, source: string): Promise<FileFac
     case "python":
     case "go":
     case "java":
+    case "rust":
       await extractCode(source, facts, language);
       if (facts.tables.some((table) => table.op === "read")) {
         const ctes = cteNamesIn(source);

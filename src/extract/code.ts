@@ -874,3 +874,287 @@ function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
 export function extractJava(root: Node, facts: FileFacts): void {
   walkJava(root, facts, { owner: null, ownerRange: null, scopeEnd: endLine(root) });
 }
+
+// ---------- Rust ----------
+
+interface RustScope {
+  /** The type of the `impl` block or the trait being walked: what `self` is, and what methods belong to. */
+  owner: string | null;
+  inFunction: boolean;
+  /** Last line of the innermost block or function. */
+  scopeEnd: number;
+  /** Type parameter → the trait it is bound by: `T` in `fn f<T: Repo>(t: T)` stands for `Repo`. */
+  bounds: Map<string, string>;
+  /** How many `mod name { ... }` blocks of this file are around: inside one, `super` is the file itself. */
+  inline: number;
+}
+
+/** A path as seen from the file, when it is written inside inline modules: each `super` that only leaves an inline module becomes `self`. */
+function rustFromFile(path: string[], inline: number): string[] {
+  let leaving = 0;
+  while (leaving < inline && path[leaving] === "super") leaving++;
+  return leaving === 0 ? path : ["self", ...path.slice(leaving)];
+}
+
+const RUST_POINTERS = new Set(["Box", "Rc", "Arc"]);
+
+/** The type a method call on a value of this type goes to: through `&`, `Box`, `Rc`, `Arc`, `dyn` and `impl`. */
+function rustTypeName(type: Node | null | undefined, bounds: Map<string, string>): string | null {
+  if (!type) return null;
+  if (type.type === "type_identifier") return bounds.get(type.text) ?? (/^[A-Z]$/.test(type.text) ? null : type.text);
+  if (type.type === "scoped_type_identifier") return type.text.replace(/\s+/g, "");
+  if (type.type === "reference_type" || type.type === "pointer_type") return rustTypeName(type.childForFieldName("type"), bounds);
+  if (type.type === "dynamic_type" || type.type === "abstract_type") return rustTypeName(type.childForFieldName("trait"), bounds);
+  if (type.type === "generic_type") {
+    const base = type.childForFieldName("type");
+    if (!RUST_POINTERS.has(base?.text ?? "")) return rustTypeName(base, bounds);
+    const argumentList = type.childForFieldName("type_arguments");
+    return rustTypeName(argumentList ? namedChildren(argumentList)[0] : null, bounds);
+  }
+  return null;
+}
+
+/** Every `use` path under a use tree: `a::{b, c::D as E, self}` and `a::*`. */
+function rustUses(node: Node, prefix: string[]): { path: string[]; local: string | null; star: boolean }[] {
+  const segments = (path: Node | null): string[] => (path ? path.text.replace(/\s+/g, "").split("::").filter(Boolean) : []);
+  switch (node.type) {
+    case "identifier":
+    case "crate":
+    case "super":
+    case "scoped_identifier": {
+      const path = [...prefix, ...segments(node)];
+      return [{ path, local: path[path.length - 1] ?? null, star: false }];
+    }
+    case "self":
+      return [{ path: prefix, local: prefix[prefix.length - 1] ?? null, star: false }];
+    case "use_as_clause": {
+      const path = [...prefix, ...segments(node.childForFieldName("path"))];
+      return [{ path, local: node.childForFieldName("alias")?.text ?? null, star: false }];
+    }
+    case "use_wildcard":
+      return [{ path: [...prefix, ...segments(namedChildren(node)[0] ?? null)], local: null, star: true }];
+    case "scoped_use_list": {
+      const list = node.childForFieldName("list");
+      const path = [...prefix, ...segments(node.childForFieldName("path"))];
+      return list ? namedChildren(list).flatMap((item) => rustUses(item, path)) : [];
+    }
+    case "use_list":
+      return namedChildren(node).flatMap((item) => rustUses(item, prefix));
+    default:
+      return [];
+  }
+}
+
+/** The names a pattern binds: `x`, `(a, b)`, `Some(v)`, `Point { x, y }`. The constructor's own name is not one of them. */
+function rustBound(pattern: Node | null): string[] {
+  if (!pattern) return [];
+  if (pattern.type === "identifier") return [pattern.text];
+  const constructor = pattern.childForFieldName("type");
+  return namedChildren(pattern).filter((child) => child.id !== constructor?.id).flatMap(rustBound);
+}
+
+function rustOthers(pattern: Node | null, range: { line: number; endLine: number; column: number }, facts: FileFacts): void {
+  for (const name of rustBound(pattern)) if (name !== "_") facts.locals.push({ name, kind: "other", ...range });
+}
+
+/** The type a `let` gives its name when it is written out: an annotation, `T { .. }`, or `T::name(..)` for a function that returns a `T`. */
+function rustLetType(node: Node, bounds: Map<string, string>): string | null {
+  const annotated = rustTypeName(node.childForFieldName("type"), bounds);
+  if (annotated) return annotated;
+  let value = node.childForFieldName("value");
+  if (value?.type === "try_expression" || value?.type === "await_expression") value = namedChildren(value)[0] ?? null;
+  if (value?.type === "struct_expression") return rustTypeName(value.childForFieldName("name"), bounds) ?? value.childForFieldName("name")?.text ?? null;
+  const callee = value?.type === "call_expression" ? value.childForFieldName("function") : null;
+  // Any `T::name()` may build a `T`. Whether it does is settled when linking, from what `name` returns.
+  if (callee?.type !== "scoped_identifier") return null;
+  const path = callee.childForFieldName("path")?.text.replace(/\s+/g, "") ?? "";
+  return /(?:^|::)[A-Z]\w*$/.test(path) ? path : null;
+}
+
+/** `new` for `let x = T::new()`, `?new` for `let x = T::new()?`, null when the type was written or built with a struct literal. */
+function rustLetConstructor(node: Node): string | null {
+  if (node.childForFieldName("type")) return null;
+  const value = node.childForFieldName("value");
+  const tried = value?.type === "try_expression";
+  const call = tried ? namedChildren(value)[0] : value;
+  const callee = call?.type === "call_expression" ? call.childForFieldName("function") : null;
+  const name = callee?.type === "scoped_identifier" ? callee.childForFieldName("name")?.text : undefined;
+  return name ? (tried ? "?" : "") + name : null;
+}
+
+function walkRust(node: Node, facts: FileFacts, scope: RustScope, impls: [string, string][]): void {
+  const here = { line: line(node), endLine: endLine(node), column: column(node) };
+  let inner = scope;
+  switch (node.type) {
+    case "mod_item": {
+      const name = node.childForFieldName("name")?.text;
+      // `mod x;` brings the file `x.rs` in, and makes `x` a name that paths in this file can start with.
+      if (name && !node.childForFieldName("body")) facts.imports.push({ specifier: `self::${name}`, names: [{ local: name, imported: name }], reexport: false, star: false, line: line(node) });
+      else {
+        if (name) facts.exports.push({ exported: name, local: name });
+        inner = { ...scope, inline: scope.inline + 1 };
+      }
+      break;
+    }
+    case "const_item":
+    case "static_item":
+    case "macro_definition": {
+      // Not symbols, but names a `use` can lead to.
+      const name = node.childForFieldName("name")?.text;
+      if (name && !scope.inFunction) facts.exports.push({ exported: name, local: name });
+      break;
+    }
+    case "use_declaration": {
+      const argument = node.childForFieldName("argument");
+      const reexport = namedChildren(node).some((child) => child.type === "visibility_modifier");
+      for (const use of argument ? rustUses(argument, []) : []) {
+        if (use.path.length === 0 || (!use.star && !use.local)) continue;
+        const last = use.path[use.path.length - 1] ?? "";
+        facts.imports.push({ specifier: rustFromFile(use.path, scope.inline).join("::"), names: use.star || !use.local ? [] : [{ local: use.local, imported: last }], reexport, star: use.star, line: line(node) });
+      }
+      return;
+    }
+    case "struct_item":
+    case "enum_item":
+    case "union_item":
+    case "trait_item":
+    case "type_item": {
+      const name = node.childForFieldName("name")?.text;
+      if (!name || scope.inFunction) break;
+      const symbol: SymbolFact = { name, kind: "class", line: line(node), endLine: endLine(node), exported: namedChildren(node).some((child) => child.type === "visibility_modifier"), isDefault: false };
+      const body = node.childForFieldName("body");
+      for (const field of body?.type === "field_declaration_list" ? namedChildren(body) : []) {
+        const fieldName = field.childForFieldName("name")?.text;
+        const fieldType = rustTypeName(field.childForFieldName("type"), scope.bounds);
+        if (fieldName && fieldType) (symbol.fields ??= {})[fieldName] = fieldType;
+      }
+      addSymbol(facts, symbol);
+      if (node.type === "trait_item") inner = { ...scope, owner: name };
+      break;
+    }
+    case "impl_item": {
+      const type = rustTypeName(node.childForFieldName("type"), new Map());
+      const trait = rustTypeName(node.childForFieldName("trait"), new Map());
+      if (type && trait) impls.push([type.split("::").pop() ?? type, trait]);
+      inner = { ...scope, owner: type ? (type.split("::").pop() ?? type) : null };
+      break;
+    }
+    case "function_item":
+    case "function_signature_item":
+    case "closure_expression": {
+      const name = node.childForFieldName("name")?.text;
+      if (name && scope.owner && !scope.inFunction) {
+        const method: SymbolFact = { name: `${scope.owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false };
+        const returned = node.childForFieldName("return_type");
+        // `Result<Self>`, `io::Result<Self>`, `Option<Self>` and aliases such as `CompileResult<'a, Self>` wrap what `?` takes out.
+        const wrapped = returned?.type === "generic_type" && /(?:Result|Option)$/.test(returned.childForFieldName("type")?.text ?? "");
+        const argumentList = wrapped ? returned.childForFieldName("type_arguments") : null;
+        const inner = argumentList ? namedChildren(argumentList).find((argument) => argument.type !== "lifetime") : returned;
+        const plain = rustTypeName(inner, new Map())?.split("::").pop();
+        if (returned) method.returns = (wrapped ? "?" : "") + (plain === "Self" ? scope.owner : (plain ?? "?"));
+        addSymbol(facts, method);
+      } else if (name && !scope.inFunction) {
+        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: namedChildren(node).some((child) => child.type === "visibility_modifier"), isDefault: false });
+      } else if (name) {
+        facts.locals.push({ name, kind: "other", line: line(node), endLine: scope.scopeEnd, column: column(node) });
+      }
+      const bounds = new Map(scope.bounds);
+      const typeParameters = node.childForFieldName("type_parameters");
+      for (const parameter of typeParameters ? namedChildren(typeParameters) : []) {
+        const bound = parameter.childForFieldName("bounds");
+        const trait = rustTypeName(bound ? namedChildren(bound)[0] : null, scope.bounds);
+        const parameterName = parameter.childForFieldName("name")?.text;
+        if (parameterName && trait) bounds.set(parameterName, trait);
+      }
+      const parameters = node.childForFieldName("parameters");
+      for (const parameter of parameters ? namedChildren(parameters) : []) {
+        if (parameter.type === "self_parameter") {
+          if (scope.owner) facts.locals.push({ name: "self", kind: "instance", type: scope.owner, ...here });
+        } else if (parameter.type === "parameter") {
+          const pattern = parameter.childForFieldName("pattern");
+          const type = pattern?.type === "identifier" ? rustTypeName(parameter.childForFieldName("type"), bounds) : null;
+          if (pattern?.type === "identifier" && type) facts.locals.push({ name: pattern.text, kind: "instance", type, ...here });
+          else rustOthers(pattern, here, facts);
+        } else rustOthers(parameter, here, facts);
+      }
+      inner = { ...scope, inFunction: true, scopeEnd: endLine(node), bounds };
+      break;
+    }
+    case "let_declaration": {
+      const pattern = node.childForFieldName("pattern");
+      const range = { ...here, endLine: scope.scopeEnd };
+      const type = pattern?.type === "identifier" ? rustLetType(node, scope.bounds) : null;
+      const via = type ? rustLetConstructor(node) : null;
+      if (pattern?.type === "identifier" && type) facts.locals.push({ name: pattern.text, kind: "instance", type, ...(via ? { via } : {}), ...range });
+      else rustOthers(pattern, range, facts);
+      break;
+    }
+    case "for_expression":
+    case "match_arm":
+      rustOthers(node.childForFieldName("pattern"), here, facts);
+      break;
+    case "let_condition":
+      // `if let Some(x) = ...` and `while let`: the names live as long as the statement they are the condition of.
+      rustOthers(node.childForFieldName("pattern"), { ...here, endLine: endLine(node.parent ?? node) }, facts);
+      break;
+    case "call_expression": {
+      let callee = node.childForFieldName("function");
+      if (callee?.type === "generic_function") callee = callee.childForFieldName("function");
+      const at = { line: line(node), column: column(node) };
+      if (callee?.type === "identifier") facts.calls.push({ callee: callee.text, receiver: null, ...at });
+      else if (callee?.type === "scoped_identifier") {
+        const name = callee.childForFieldName("name")?.text;
+        const path = callee.childForFieldName("path")?.text.replace(/\s+/g, "");
+        // A path call keeps its path as the receiver, marked by the trailing `::` so that it is not taken for a variable.
+        if (name && path) facts.calls.push({ callee: name, receiver: `${rustFromFile(path.split("::"), scope.inline).join("::")}::`, ...at });
+      } else if (callee?.type === "field_expression") {
+        const value = callee.childForFieldName("value");
+        const field = callee.childForFieldName("field")?.text;
+        if (!field) break;
+        if (value?.type === "identifier" || value?.type === "self") facts.calls.push({ callee: field, receiver: value.text, ...at });
+        else if (value?.type === "field_expression" && value.childForFieldName("value")?.type === "self") {
+          const owner = value.childForFieldName("field")?.text;
+          if (owner) facts.calls.push({ callee: field, receiver: `self.${owner}`, ...at });
+        }
+      }
+      break;
+    }
+    case "token_tree": {
+      // Inside a macro there is no syntax tree, only tokens: `assert_eq!(total(x), 3)` still calls `total`.
+      const tokens = namedChildren(node);
+      tokens.forEach((token, index) => {
+        const next = tokens[index + 1];
+        if (token.type !== "identifier" || next?.type !== "token_tree" || !next.text.startsWith("(") || next.startIndex !== token.endIndex) return;
+        // `x.len()` is a method call on something unknown. `a::b::total()` is a path call: collect the path backwards.
+        const path: string[] = [];
+        let before = token.previousSibling;
+        while (before?.type === "::" && before.previousSibling && /^(?:identifier|crate|super|self)$/.test(before.previousSibling.type)) {
+          path.unshift(before.previousSibling.text);
+          before = before.previousSibling.previousSibling;
+        }
+        if (before?.type === "." || before?.type === "::" || before?.type === "$") return;
+        const receiver = path.length > 0 ? `${rustFromFile(path, scope.inline).join("::")}::` : null;
+        facts.calls.push({ callee: token.text, receiver, line: line(token), column: column(token) });
+      });
+      break;
+    }
+    case "string_literal":
+    case "raw_string_literal":
+      sniffSql(node, facts);
+      return;
+    default:
+      break;
+  }
+  if (node.type === "block" || node.type === "match_arm") inner = { ...inner, scopeEnd: endLine(node) };
+  for (const child of namedChildren(node)) walkRust(child, facts, inner, impls);
+}
+
+export function extractRust(root: Node, facts: FileFacts): void {
+  const impls: [string, string][] = [];
+  walkRust(root, facts, { owner: null, inFunction: false, scopeEnd: endLine(root), bounds: new Map(), inline: 0 }, impls);
+  // `impl Trait for Type` gives the type the trait's methods, default ones included.
+  for (const [type, trait] of impls) {
+    const symbol = facts.symbols.find((candidate) => candidate.name === type && candidate.kind === "class");
+    if (symbol && !symbol.embeds?.includes(trait)) (symbol.embeds ??= []).push(trait);
+  }
+}

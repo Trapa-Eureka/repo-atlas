@@ -114,16 +114,27 @@ function goModuleAliases(folder: string, text: string): PathAlias[] {
   ];
 }
 
-/** Import aliases declared by the repository: tsconfig `paths` / `baseUrl`, workspace package names, and Go module paths. */
+/** `name = "my-crate"` under `[package]` in a Cargo.toml: other crates of the repository reach this one as `my_crate::`. */
+function cargoAliases(folder: string, text: string): PathAlias[] {
+  const section = /^\s*\[package\]([\s\S]*?)(?=^\s*\[|(?![\s\S]))/m.exec(text)?.[1] ?? "";
+  const name = /^\s*name\s*=\s*"([^"]+)"/m.exec(section)?.[1];
+  // `[lib] path = "..."` moves the root of the library away from src/lib.rs.
+  const library = /^\s*\[lib\]([\s\S]*?)(?=^\s*\[|(?![\s\S]))/m.exec(text)?.[1] ?? "";
+  const root = /^\s*path\s*=\s*"([^"]+)"/m.exec(library)?.[1] ?? "src/lib.rs";
+  return name ? [{ scope: "", prefix: name.replace(/-/g, "_"), exact: true, targets: [folder, root.replace(/^\.\//, "")], language: "rust" }] : [];
+}
+
+/** Import aliases declared by the repository: tsconfig `paths` / `baseUrl`, workspace package names, Go module paths and Rust crate names. */
 export function loadAliases(root: string, configs: string[]): PathAlias[] {
   const aliases: PathAlias[] = [];
   for (const path of configs) {
     const folder = posix.dirname(path) === "." ? "" : posix.dirname(path);
-    if (basename(path) === "go.mod") {
+    if (basename(path) === "go.mod" || basename(path) === "Cargo.toml") {
       try {
-        aliases.push(...goModuleAliases(folder, readFileSync(join(root, path), "utf8")));
+        const text = readFileSync(join(root, path), "utf8");
+        aliases.push(...(basename(path) === "go.mod" ? goModuleAliases(folder, text) : cargoAliases(folder, text)));
       } catch {
-        // unreadable go.mod: its imports stay external
+        // unreadable manifest: its imports stay external
       }
       continue;
     }

@@ -430,3 +430,132 @@ describe("a name declared inside a case clause", () => {
     ).toEqual(["a/a.go#f -> a/a.go#Bb.N"]);
   });
 });
+
+describe("Rust", () => {
+  const crates: LinkOptions = { aliases: [{ scope: "", prefix: "shop_core", exact: true, targets: ["core", "src/lib.rs"], language: "rust" }] };
+  const files = {
+    "app/src/main.rs":
+      'mod mailer;\nmod store;\nmod util;\n\nuse anyhow::anyhow;\nuse mailer::{Mailer, Sender as Out};\nuse shop_core::audit::record;\nuse shop_core::Clock;\nuse store::*;\nuse util::helper as help;\n\nfn main() {\n    let mailer = Mailer::new(std::env::var("SMTP_HOST").unwrap());\n    mailer.send("hi");\n    mailer.flush();\n    let store = Store { repo: Repo::default() };\n    store.load();\n    help();\n    util::helper();\n    crate::util::deep::dive();\n    record("start");\n    let clock = Clock::new();\n    clock.now();\n    let unknown = make();\n    unknown.send("x");\n    notify(&mailer);\n    assert_eq!(total(1), 1);\n    anyhow!("x");\n}\n\nfn notify(out: &dyn Out) {\n    out.send("later");\n}\n\nfn total(n: u8) -> u8 {\n    n\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        super::total(2);\n        total(3);\n    }\n}\n',
+    "app/src/mailer.rs":
+      "pub trait Sender {\n    fn send(&self, body: &str);\n\n    fn flush(&self) {\n        self.send(\"\");\n    }\n}\n\npub struct Mailer {\n    host: String,\n}\n\nimpl Mailer {\n    pub fn new(host: String) -> Self {\n        Self::check(&host);\n        Mailer { host }\n    }\n\n    fn check(host: &str) {}\n}\n\nimpl Sender for Mailer {\n    fn send(&self, body: &str) {}\n}\n",
+    "app/src/store.rs":
+      'pub struct Repo;\n\nimpl Default for Repo {\n    fn default() -> Self {\n        Repo\n    }\n}\n\nimpl Repo {\n    pub fn find(&self) -> u8 {\n        let sql = "SELECT id FROM notifications";\n        1\n    }\n}\n\npub struct Store {\n    pub repo: Repo,\n}\n\nimpl Store {\n    pub fn load(&self) -> u8 {\n        self.repo.find()\n    }\n}\n',
+    "app/src/util/mod.rs": "pub mod deep;\n\npub fn helper() {}\n",
+    "app/src/util/deep.rs": "pub fn dive() {\n    super::helper();\n}\n",
+    "core/src/lib.rs": "pub mod audit;\nmod clock;\n\npub use clock::Clock;\n",
+    "core/src/audit.rs": "pub fn record(event: &str) {}\n",
+    "core/src/clock.rs": "pub struct Clock;\n\nimpl Clock {\n    pub fn new() -> Self {\n        Clock\n    }\n\n    pub fn now(&self) -> u64 {\n        0\n    }\n}\n",
+  };
+
+  it("follows mod, use, globs, another crate of the repository and a name passed on with pub use", async () => {
+    expect(await edgesOf("imports", files, crates)).toEqual([
+      "app/src/main.rs -> app/src/mailer.rs",
+      "app/src/main.rs -> app/src/store.rs",
+      "app/src/main.rs -> app/src/util/mod.rs",
+      "app/src/main.rs -> core/src/audit.rs",
+      "app/src/main.rs -> core/src/clock.rs",
+      "app/src/main.rs -> mod:anyhow",
+      "app/src/util/mod.rs -> app/src/util/deep.rs",
+      "core/src/lib.rs -> core/src/audit.rs",
+      "core/src/lib.rs -> core/src/clock.rs",
+    ]);
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    expect(link(facts, crates).unresolved).toEqual([]);
+  });
+
+  it("links functions by path, methods on values whose type is written, trait methods and calls inside macros", async () => {
+    expect(await edgesOf("calls", files, crates)).toEqual([
+      "app/src/mailer.rs#Mailer.new -> app/src/mailer.rs#Mailer.check",
+      "app/src/mailer.rs#Sender.flush -> app/src/mailer.rs#Sender.send",
+      "app/src/main.rs#adds -> app/src/main.rs#total",
+      "app/src/main.rs#main -> app/src/mailer.rs#Mailer.new",
+      "app/src/main.rs#main -> app/src/mailer.rs#Mailer.send",
+      "app/src/main.rs#main -> app/src/mailer.rs#Sender.flush",
+      "app/src/main.rs#main -> app/src/main.rs#notify",
+      "app/src/main.rs#main -> app/src/main.rs#total",
+      "app/src/main.rs#main -> app/src/store.rs#Repo.default",
+      "app/src/main.rs#main -> app/src/store.rs#Store.load",
+      "app/src/main.rs#main -> app/src/util/deep.rs#dive",
+      "app/src/main.rs#main -> app/src/util/mod.rs#helper",
+      "app/src/main.rs#main -> core/src/audit.rs#record",
+      "app/src/main.rs#main -> core/src/clock.rs#Clock.new",
+      "app/src/main.rs#main -> core/src/clock.rs#Clock.now",
+      "app/src/main.rs#notify -> app/src/mailer.rs#Sender.send",
+      "app/src/store.rs#Store.load -> app/src/store.rs#Repo.find",
+      "app/src/util/deep.rs#dive -> app/src/util/mod.rs#helper",
+    ]);
+  });
+
+  it("reads tables and env keys, and gives the same graph whatever order the files come in", async () => {
+    expect(await edgesOf("reads_table", files, crates)).toEqual(["app/src/store.rs -> table:notifications"]);
+    expect(await edgesOf("uses_env", files, crates)).toEqual(["app/src/main.rs -> env:SMTP_HOST"]);
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    expect(link([...facts].reverse(), crates)).toEqual(link(facts, crates));
+  });
+
+  it("treats lib.rs and main.rs as two crates, and a module folder named tests as a module", async () => {
+    const both = {
+      "src/lib.rs": "pub mod shared;\n\npub fn helper() {}\n",
+      "src/shared.rs": "pub fn common() {\n    crate::helper();\n}\n",
+      "src/main.rs": "mod mailer;\n\nuse mailer::Mailer;\n\nfn helper() {}\n\nfn main() {\n    Mailer::new();\n    mailer::go();\n    crate::helper();\n}\n",
+      "src/mailer.rs": "pub struct Mailer;\n\nimpl Mailer {\n    pub fn new() -> Self {\n        Mailer\n    }\n}\n\npub fn go() {\n    crate::helper();\n}\n",
+      "src/tests/mod.rs": "mod foo;\n",
+      "src/tests/foo.rs": "use crate::shared::common;\n\nfn check() {\n    common();\n    super::super::shared::common();\n}\n",
+      "examples/demo.rs": "fn local() {}\n\nfn main() {\n    crate::local();\n}\n",
+    };
+    expect(await edgesOf("calls", both)).toEqual([
+      "examples/demo.rs#main -> examples/demo.rs#local",
+      "src/mailer.rs#go -> src/main.rs#helper",
+      "src/main.rs#main -> src/mailer.rs#Mailer.new",
+      "src/main.rs#main -> src/mailer.rs#go",
+      "src/main.rs#main -> src/main.rs#helper",
+      "src/shared.rs#common -> src/lib.rs#helper",
+      "src/tests/foo.rs#check -> src/shared.rs#common",
+    ]);
+    expect(await edgesOf("imports", both)).toEqual(["src/lib.rs -> src/shared.rs", "src/main.rs -> src/mailer.rs", "src/tests/foo.rs -> src/shared.rs", "src/tests/mod.rs -> src/tests/foo.rs"]);
+  });
+
+  it("does not take a method call in a macro, a constructor of another type or a private item for a call it can follow", async () => {
+    expect(
+      await edgesOf("calls", {
+        "src/lib.rs":
+          "mod a;\nmod b;\n\nuse a::*;\nuse b::*;\n\npub struct Aa;\n\nimpl Aa {\n    pub fn go(&self) {}\n}\n\npub struct Bb;\n\nimpl Bb {\n    pub fn new() -> Aa {\n        Aa\n    }\n\n    pub fn open<'a>() -> io::Result<'a, Self> {\n        Ok(Bb)\n    }\n\n    pub fn go(&self) {}\n}\n\nfn total() -> u8 {\n    1\n}\n\nfn len() -> u8 {\n    1\n}\n\npub fn run(x: Vec<u8>) {\n    println!(\"{}\", x.len());\n    println!(\"{}\", other::total());\n    assert!(total() > 0);\n    let made = Bb::new();\n    made.go();\n    let unwrapped = Bb::open();\n    unwrapped.go();\n    hidden();\n}\n\npub fn tried() -> Result<(), ()> {\n    let opened = Bb::open()?;\n    opened.go();\n    Ok(())\n}\n",
+        "src/a.rs": "fn hidden() {}\n",
+        "src/b.rs": "pub fn hidden() {}\n",
+      }),
+    ).toEqual(["src/lib.rs#run -> src/b.rs#hidden", "src/lib.rs#run -> src/lib.rs#Bb.new", "src/lib.rs#run -> src/lib.rs#Bb.open", "src/lib.rs#run -> src/lib.rs#total", "src/lib.rs#tried -> src/lib.rs#Bb.go", "src/lib.rs#tried -> src/lib.rs#Bb.open"]);
+  });
+
+  it("reports a path of the crate that leads nowhere, but not one to a constant, a macro or an inline module", async () => {
+    const facts = await Promise.all(
+      Object.entries({
+        "src/lib.rs": "mod gone;\nmod real;\n\nuse crate::missing::Thing;\nuse crate::real::{LIMIT, inner::deep, shout, Nope};\nuse serde::Serialize;\n",
+        "src/real.rs": "pub const LIMIT: u8 = 1;\n\nmacro_rules! shout {\n    () => {};\n}\n\npub mod inner {\n    pub fn deep() {}\n}\n",
+      }).map(([path, source]) => extractFile(path, source)),
+    );
+    // `crate::real::Nope` reaches a file, where a macro could still define it: the file is depended on and nothing is reported.
+    expect(link(facts).unresolved.map((item) => item.specifier)).toEqual(["self::gone", "crate::missing::Thing"]);
+    expect(link(facts).edges.filter((edge) => edge.kind === "imports").map((edge) => `${edge.src} -> ${edge.dst}`)).toEqual(["file:src/lib.rs -> file:src/real.rs", "file:src/lib.rs -> mod:serde"]);
+  });
+
+  it("stays fast when many modules glob-import each other", async () => {
+    const names = Array.from({ length: 24 }, (_, index) => `m${index}`);
+    const files: Record<string, string> = { "src/lib.rs": names.map((name) => `pub mod ${name};\n`).join("") };
+    for (const name of names) {
+      files[`src/${name}.rs`] = `${names.filter((other) => other !== name).map((other) => `pub use crate::${other}::*;\n`).join("")}\npub fn f_${name}() {\n    nowhere();\n    f_m0();\n}\n`;
+    }
+    const started = performance.now();
+    expect(await edgesOf("calls", files)).toHaveLength(23);
+    expect(performance.now() - started).toBeLessThan(3000);
+  });
+
+  it("survives modules that glob-import each other", async () => {
+    expect(
+      await edgesOf("calls", {
+        "src/lib.rs": "mod a;\nmod b;\n",
+        "src/a.rs": "pub use crate::b::*;\n\npub fn one() {\n    two();\n    Missing::thing();\n}\n",
+        "src/b.rs": "pub use crate::a::*;\n\npub fn two() {\n    one();\n    nowhere();\n}\n",
+      }),
+    ).toEqual(["src/a.rs#one -> src/b.rs#two", "src/b.rs#two -> src/a.rs#one"]);
+  });
+});

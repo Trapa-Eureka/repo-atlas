@@ -1,4 +1,4 @@
-export type Language = "typescript" | "tsx" | "javascript" | "python" | "go" | "java" | "sql" | "markdown" | "env";
+export type Language = "typescript" | "tsx" | "javascript" | "python" | "go" | "java" | "rust" | "sql" | "markdown" | "env";
 
 export interface SymbolFact {
   /** Qualified inside the file: `name` for top-level, `Class.method` for members. */
@@ -10,8 +10,10 @@ export interface SymbolFact {
   isDefault: boolean;
   /** For a class: the name it extends, as written in this file. */
   extends?: string;
-  /** For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. */
+  /** For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. For a Rust type: the traits implemented for it in its own file. */
   embeds?: string[];
+  /** For a Rust method: the type it returns, `?T` when wrapped in `Result` or `Option`. Says whether `let x = T::new()` makes `x` a `T`. */
+  returns?: string;
   /** For a Go struct: field name → the type written for it (`Store`, `db.Repo`). */
   fields?: Record<string, string>;
 }
@@ -19,7 +21,8 @@ export interface SymbolFact {
 /**
  * A name a file exports that is not the name of one of its own symbols: `export { a as b }`,
  * `export default a`, `module.exports = a`. For Go: a package-level constant or variable, which is
- * not a symbol but still says which file of the package a user of that name depends on.
+ * not a symbol but still says which file of the package a user of that name depends on. For Rust:
+ * an inline module, constant, static or macro, so that a path naming it is known to lead somewhere.
  */
 export interface ExportFact {
   /** The name seen from outside: `b`, `default`, or `default.b` for a member of a default-exported object. */
@@ -44,6 +47,8 @@ export interface LocalFact {
   object?: string;
   property?: string;
   type?: string;
+  /** Rust: the constructor the type was read from (`new` in `let x = T::new()`, `?new` in `let x = T::new()?`), to be checked against what it returns. */
+  via?: string;
   line: number;
   endLine: number;
   /** Where on its first line the scope starts. A call earlier on that line is outside it. */
@@ -72,7 +77,7 @@ export interface ImportFact {
 
 export interface CallFact {
   callee: string;
-  /** `obj` in `obj.callee()`, `this` / `self` / `super`, `this.field` in `this.field.callee()`, or `new` for `new Callee()` in Java. */
+  /** `obj` in `obj.callee()`, `this` / `self` / `super`, `this.field` in `this.field.callee()`, `new` for `new Callee()` in Java, or a Rust path ending in `::` for `a::b::callee()`. */
   receiver: string | null;
   line: number;
   /** Where on the line the call starts, to tell `run(x, (run) => 1)` apart from a call inside the inner function. */

@@ -58,6 +58,17 @@ describe("Go modules", () => {
       "example.com/svc/ -> svc/ (go)",
     ]);
   });
+
+  it("reads a crate name from Cargo.toml, as Rust paths spell it", () => {
+    root = mkdtempSync(join(tmpdir(), "atlas-cargo-"));
+    mkdirSync(join(root, "crates/shop-core/src"), { recursive: true });
+    writeFileSync(join(root, "Cargo.toml"), '[workspace]\nmembers = ["crates/*"]\n\n[workspace.package]\nname = "not-a-crate"\n');
+    writeFileSync(join(root, "crates/shop-core/Cargo.toml"), '[package]\nname = "shop-core"\nversion = "0.1.0"\n\n[dependencies]\nname = "1"\n');
+    writeFileSync(join(root, "crates/shop-core/src/lib.rs"), "pub fn f() {}\n");
+    const walked = walk(root);
+    expect(walked.files.map((file) => file.path)).toEqual(["crates/shop-core/src/lib.rs"]);
+    expect(loadAliases(root, walked.configs).map((alias) => `${alias.prefix} -> ${alias.targets.join(", ")} (${alias.language})`)).toEqual(["shop_core -> crates/shop-core, src/lib.rs (rust)"]);
+  });
 });
 
 describe("loadAliases", () => {
