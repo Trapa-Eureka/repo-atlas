@@ -18,7 +18,7 @@ export interface SearchOptions {
 
 function score(node: GraphNode, query: string, lower: string): number {
   const name = node.name.toLowerCase();
-  const short = name.split(/[/.#]/).pop() ?? name;
+  const short = name.split(/[/.#]|::/).pop() ?? name;
   if (node.id === query || node.name === query) return 100;
   if (name === lower) return 95;
   if (node.kind === "file" && name.endsWith(`/${lower}`)) return 90;
@@ -52,7 +52,7 @@ function exactMatches(graph: Graph, query: string): GraphNode[] {
       if (node.kind === "symbol" && node.name === symbolPart && (node.file === filePart || node.file?.endsWith(`/${filePart}`))) matches.push(node);
     } else if (node.kind === "file") {
       if (node.name === query || node.name.endsWith(`/${query}`)) matches.push(node);
-    } else if (node.name === query || (node.kind === "symbol" && node.name.split(".").pop() === query) || (node.kind === "table" && node.name === query.toLowerCase())) {
+    } else if (node.name === query || (node.kind === "symbol" && node.name.split(/\.|::/).pop() === query) || (node.kind === "table" && node.name === query.toLowerCase())) {
       matches.push(node);
     }
   }

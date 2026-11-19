@@ -559,3 +559,212 @@ describe("Rust", () => {
     ).toEqual(["src/a.rs#one -> src/b.rs#two", "src/b.rs#two -> src/a.rs#one"]);
   });
 });
+
+describe("Ruby", () => {
+  const files = {
+    "lib/shop.rb": 'require "json"\nrequire "shop/order"\nrequire_relative "shop/helpers"\n\nmodule Shop\n  autoload :Ledger, "shop/ledger"\n\n  def self.run(id)\n    order = Order.new(id)\n    order.total\n    order = lookup(id)\n    order.save\n    Billing::Invoice.new(order).send_now\n    Ledger.record(id)\n    log("done")\n  end\nend\n',
+    "lib/shop/order.rb":
+      'module Shop\n  class Order < Record\n    include Priced\n    attr_reader :repo\n    LIMIT = 5\n\n    def initialize(id)\n      @repo = Repo.new\n      @other = id\n    end\n\n    def total\n      repo.load\n      @repo.load\n      @other.load\n      price + tax\n      save\n      self.class.table\n      helper = 1\n      helper\n    end\n\n    def save\n      super\n      total(1)\n    end\n\n    def helper; end\n\n    def self.table\n      "orders"\n    end\n  end\nend\n',
+    "lib/shop/record.rb": "module Shop\n  class Record\n    def save; end\n  end\n\n  class Repo\n    def load; end\n  end\n\n  module Priced\n    def price; end\n\n    def tax; end\n  end\nend\n",
+    "lib/shop/ledger.rb": "module Shop\n  module Ledger\n    def self.record(id)\n      Order::LIMIT\n    end\n  end\nend\n",
+    "lib/shop/helpers.rb": "def log(message)\n  puts message\nend\n",
+    "lib/billing/invoice.rb": "module Billing\n  class Invoice\n    def initialize(order); end\n\n    def send_now\n      Shop::Order.table\n      ::Shop.run(1)\n    end\n  end\nend\n",
+    "spec/order_spec.rb": 'require "spec_helper"\nrequire_relative "missing"\n\nRSpec.describe Shop::Order do\n  it "adds" do\n    described_class.new(1).total\n  end\nend\n',
+    "spec/spec_helper.rb": 'require "shop"\n',
+  };
+
+  it("follows require, require_relative and autoload, and the classes a file names without requiring them", async () => {
+    expect(await edgesOf("imports", files)).toEqual([
+      "lib/billing/invoice.rb -> lib/shop.rb",
+      "lib/billing/invoice.rb -> lib/shop/order.rb",
+      "lib/shop.rb -> lib/billing/invoice.rb",
+      "lib/shop.rb -> lib/shop/helpers.rb",
+      "lib/shop.rb -> lib/shop/ledger.rb",
+      "lib/shop.rb -> lib/shop/order.rb",
+      "lib/shop.rb -> mod:json",
+      "lib/shop/ledger.rb -> lib/shop/order.rb",
+      "lib/shop/order.rb -> lib/shop/record.rb",
+      "spec/order_spec.rb -> lib/shop/order.rb",
+      "spec/order_spec.rb -> spec/spec_helper.rb",
+      "spec/spec_helper.rb -> lib/shop.rb",
+    ]);
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    expect(link(facts).unresolved.map((item) => `${item.file}: ${item.specifier}`)).toEqual(["spec/order_spec.rb: ./missing"]);
+  });
+
+  it("links methods of the class itself, of what it inherits and includes, and of values made with new", async () => {
+    // Not linked: `order.save` after `order = lookup(id)`, `@other.load`, `helper` once it is a variable, `described_class.new(1).total`.
+    expect(await edgesOf("calls", files)).toEqual([
+      "lib/billing/invoice.rb#Billing::Invoice.send_now -> lib/shop.rb#Shop.run",
+      "lib/billing/invoice.rb#Billing::Invoice.send_now -> lib/shop/order.rb#Shop::Order.table",
+      "lib/shop.rb#Shop.run -> lib/billing/invoice.rb#Billing::Invoice",
+      "lib/shop.rb#Shop.run -> lib/billing/invoice.rb#Billing::Invoice.send_now",
+      "lib/shop.rb#Shop.run -> lib/shop/helpers.rb#log",
+      "lib/shop.rb#Shop.run -> lib/shop/ledger.rb#Shop::Ledger.record",
+      "lib/shop.rb#Shop.run -> lib/shop/order.rb#Shop::Order",
+      "lib/shop.rb#Shop.run -> lib/shop/order.rb#Shop::Order.total",
+      "lib/shop/order.rb#Shop::Order.initialize -> lib/shop/record.rb#Shop::Repo",
+      "lib/shop/order.rb#Shop::Order.save -> lib/shop/order.rb#Shop::Order.total",
+      "lib/shop/order.rb#Shop::Order.save -> lib/shop/record.rb#Shop::Record.save",
+      "lib/shop/order.rb#Shop::Order.total -> lib/shop/order.rb#Shop::Order.save",
+      "lib/shop/order.rb#Shop::Order.total -> lib/shop/order.rb#Shop::Order.table",
+      "lib/shop/order.rb#Shop::Order.total -> lib/shop/record.rb#Shop::Priced.price",
+      "lib/shop/order.rb#Shop::Order.total -> lib/shop/record.rb#Shop::Priced.tax",
+      "lib/shop/order.rb#Shop::Order.total -> lib/shop/record.rb#Shop::Repo.load",
+    ]);
+  });
+
+  it("looks a constant up in each namespace around it, innermost first, and in every file that opens the class", async () => {
+    expect(
+      await edgesOf("calls", {
+        "app/a.rb": "class Cache\n  def self.get; end\nend\n\nmodule Api\n  class Cache\n    def self.get; end\n  end\n\n  class Client\n    def call\n      Cache.get\n      ::Cache.get\n      Cache.put\n    end\n  end\nend\n\nclass Api::Other\n  def call\n    Cache.get\n  end\nend\n",
+        "app/b.rb": "module Api\n  class Cache\n    class << self\n      def put; end\n    end\n  end\nend\n",
+      }),
+    ).toEqual(["app/a.rb#Api::Client.call -> app/a.rb#Api::Cache.get", "app/a.rb#Api::Client.call -> app/a.rb#Cache.get", "app/a.rb#Api::Client.call -> app/b.rb#Api::Cache.put", "app/a.rb#Api::Other.call -> app/a.rb#Cache.get"]);
+  });
+
+  it("does not take a variable, a parameter or a name bound by a pattern for a call", async () => {
+    expect(
+      await edgesOf("calls", {
+        "a.rb":
+          "class Job\n  def size; end\n\n  def name; end\n\n  def count; end\n\n  def run(size, items)\n    size\n    items.each { |name| name }\n    case items\n    in {count:}\n      count\n    end\n    total = Point.new\n    total.norm\n    name\n  end\nend\n\nPoint = Struct.new(:x) do\n  def norm; end\nend\n",
+      }),
+    ).toEqual(["a.rb#Job.run -> a.rb#Job.name", "a.rb#Job.run -> a.rb#Point", "a.rb#Job.run -> a.rb#Point.norm"]);
+  });
+
+  it("gives an Active Record model the table of its name, when the repository defines that table", async () => {
+    const rails = {
+      "db/schema.rb": 'ActiveRecord::Schema.define do\n  create_table "order_items", force: :cascade do |t|\n  end\n  create_table :people do |t|\n  end\nend\n',
+      "app/models/order_item.rb": "class OrderItem < ApplicationRecord\nend\n",
+      "app/models/person.rb": "class Person < ActiveRecord::Base\nend\n",
+      "app/models/visit.rb": "class Visit < ApplicationRecord\nend\n",
+      "app/models/legacy.rb": 'class Legacy < ApplicationRecord\n  self.table_name = "old_things"\nend\n',
+      // A model in a module has the module's prefix when that table exists, and the plain name when not.
+      "db/more.rb": 'create_table "web_settings"\ncreate_table "settings"\ncreate_table "users"\n',
+      "app/models/web/setting.rb": "class Web::Setting < ApplicationRecord\nend\n",
+      "app/models/admin/user.rb": "module Admin\n  class User < ApplicationRecord\n  end\nend\n",
+    };
+    expect(await edgesOf("reads_table", rails)).toEqual([
+      "app/models/admin/user.rb -> table:users",
+      "app/models/legacy.rb -> table:old_things",
+      "app/models/order_item.rb -> table:order_items",
+      "app/models/person.rb -> table:people",
+      "app/models/web/setting.rb -> table:web_settings",
+    ]);
+    expect((await edgesOf("defines_table", rails)).filter((edge) => !edge.startsWith("db/more.rb"))).toEqual(["db/schema.rb -> table:order_items", "db/schema.rb -> table:people"]);
+    // A table name a model states is not a definition, so it does not confirm the guess for another model.
+    expect(await edgesOf("reads_table", { "a.rb": 'class Legacy < ApplicationRecord\n  self.table_name = "users"\nend\n\nclass User < ApplicationRecord\nend\n\nclass Base < ApplicationRecord\n  self.abstract_class = true\nend\n' })).toEqual(["a.rb -> table:users"]);
+    const twice = await extractFile("b.rb", 'class User < ApplicationRecord\n  SQL = "SELECT id FROM users"\nend\n');
+    expect(twice.tables.map((table) => `${table.name}:${table.inferred ?? false}`)).toEqual(["users:true", "users:false"]);
+  });
+
+  it("reads SQL in a heredoc, leaving out what is interpolated and what a WITH clause names", async () => {
+    const source = 'def fix(source)\n  execute <<~SQL\n    ALTER TABLE #{source}\n    ADD CONSTRAINT fk FOREIGN KEY (a) REFERENCES accounts (id)\n  SQL\n  count_by_sql(<<~SQL)\n    WITH RECURSIVE ancestors(id, depth) AS (\n      SELECT s.id, 0 FROM statuses s\n      UNION ALL\n      SELECT s.id, 1 FROM ancestors JOIN statuses s ON true\n    )\n    SELECT id FROM ancestors\n  SQL\nend\n';
+    const facts = await extractFile("lib/fix.rb", source);
+    expect(facts.tables.map((table) => `${table.op}:${table.name}`).sort()).toEqual(["read:accounts", "read:statuses"]);
+  });
+
+  it("places a constant read through a class in the file that assigns it, and a class of a gem nowhere", async () => {
+    expect(
+      await edgesOf("imports", {
+        "config/initializers/devise.rb": "module Devise\n  def self.custom; end\nend\n",
+        "app/controllers/confirmations_controller.rb": "class ConfirmationsController < Devise::ConfirmationsController\n  include Limits\n  LIMIT ||= 3\nend\n",
+        "app/controllers/concerns/limits.rb": "module Limits\n  WINDOW = 5\n\n  def within?; end\nend\n",
+        "app/jobs/sweep.rb": "class Sweep\n  def run\n    ConfirmationsController::LIMIT\n  end\nend\n",
+        "app/jobs/prune.rb": "class Prune\n  def run\n    ConfirmationsController::WINDOW + ConfirmationsController::NOWHERE\n  end\nend\n",
+      }),
+    ).toEqual([
+      "app/controllers/confirmations_controller.rb -> app/controllers/concerns/limits.rb",
+      "app/jobs/prune.rb -> app/controllers/concerns/limits.rb",
+      "app/jobs/prune.rb -> app/controllers/confirmations_controller.rb",
+      "app/jobs/sweep.rb -> app/controllers/confirmations_controller.rb",
+    ]);
+  });
+
+  it("forgets what a name held where Ruby does: in a def or a class, and after any other binding of it", async () => {
+    const store = "class Store\n  def find; end\nend\n";
+    expect(
+      await edgesOf("calls", {
+        "bin/run.rb": `${store}store = Store.new\nstore.find\n\ndef run(store)\n  store.find\nend\n\ndef other\n  store = lookup\n  store.find\nend\n\nclass Job\n  def go(store)\n    store.find\n  end\nend\n`,
+      }),
+    ).toEqual(["bin/run.rb -> bin/run.rb#Store", "bin/run.rb -> bin/run.rb#Store.find"]);
+    const after = (binding: string) => edgesOf("calls", { "a.rb": `${store}def run(list)\n  a = Store.new\n${binding}\n  a.find\nend\n` });
+    for (const binding of ["  a, b = list", "  for a in list; end", "  begin; rescue => a; end", "  case list\n  in {a:}\n  end", "  list.each { a = it }"]) {
+      expect(await after(binding), binding).toEqual(["a.rb#run -> a.rb#Store"]);
+    }
+    expect(await after("  list.each { |a| a.find }\n  b = 1")).toEqual(["a.rb#run -> a.rb#Store", "a.rb#run -> a.rb#Store.find"]);
+    expect(await edgesOf("calls", { "a.rb": `${store}def run(list)\n  a = Store.new\n  list.each { |a| a.find }\nend\n` })).toEqual(["a.rb#run -> a.rb#Store"]);
+  });
+
+  it("keeps the instance variables of a class to that class, and follows a reader of one", async () => {
+    expect(
+      await edgesOf("calls", {
+        "a.rb":
+          "class Repo\n  def load; end\nend\n\nclass Outer\n  attr_reader :repo, :pair\n\n  def initialize\n    @repo = Repo.new\n    @pair = Repo.new\n    @pair, @other = 1, 2\n  end\n\n  def read\n    repo.load\n  end\n\n  def both\n    @pair.load\n  end\n\n  class Inner\n    def initialize(repo)\n      @repo = repo\n    end\n\n    def run\n      @repo.load\n    end\n  end\n\n  class Bare\n    def run\n      @repo.load\n    end\n  end\nend\n",
+      }),
+    ).toEqual(["a.rb#Outer.initialize -> a.rb#Repo", "a.rb#Outer.read -> a.rb#Repo.load"]);
+  });
+
+  it("asks an included module before the parent, and looks the parent up from outside the class", async () => {
+    expect(
+      await edgesOf("calls", {
+        "a.rb": "class Record\n  def price; end\nend\n\nmodule Priced\n  def price; end\nend\n\nclass Order < Record\n  include Priced\n\n  def total\n    price\n  end\nend\n",
+        "app/users_controller.rb": "class UsersController\n  def index; end\nend\n",
+        "app/admin/users_controller.rb": "module Admin\n  class UsersController < UsersController\n    def index\n      super\n    end\n  end\nend\n",
+      }),
+    ).toEqual(["a.rb#Order.total -> a.rb#Priced.price", "app/admin/users_controller.rb#Admin::UsersController.index -> app/users_controller.rb#UsersController.index"]);
+    expect(
+      await edgesOf("imports", {
+        "app/users_controller.rb": "class UsersController\nend\n",
+        "app/admin/users_controller.rb": "module Admin\n  class UsersController < UsersController\n  end\nend\n",
+      }),
+    ).toEqual(["app/admin/users_controller.rb -> app/users_controller.rb"]);
+  });
+
+  it("reaches the parent of a class that includes many modules", async () => {
+    const mixins = Array.from({ length: 40 }, (_, n) => `module M${n}\n  def m${n}; end\nend\n`).join("");
+    const includes = Array.from({ length: 40 }, (_, n) => `  include M${n}\n`).join("");
+    expect(await edgesOf("calls", { "a.rb": `${mixins}class Base\n  def self.index; end\nend\n\nclass Model < Base\n${includes}  index\nend\n` })).toEqual(["a.rb#Model -> a.rb#Base.index"]);
+  });
+
+  it("matches a require against lib folders and the requiring file's own test folder only", async () => {
+    expect(
+      await edgesOf("imports", {
+        "gems/a/lib/a.rb": 'require "set"\nrequire "a/core"\nrequire "helper"\n',
+        "gems/a/lib/a/core.rb": "",
+        "gems/b/lib/a/core.rb": "",
+        "gems/b/test/set.rb": "",
+        "gems/b/test/helper.rb": "",
+        "gems/b/test/b_test.rb": 'require "helper"\nrequire "a/core"\n',
+      }),
+    ).toEqual(["gems/a/lib/a.rb -> gems/a/lib/a/core.rb", "gems/a/lib/a.rb -> mod:helper", "gems/a/lib/a.rb -> mod:set", "gems/b/test/b_test.rb -> gems/b/lib/a/core.rb", "gems/b/test/b_test.rb -> gems/b/test/helper.rb"]);
+  });
+
+  it("places a class opened in several files in the file named after it, else in the few files that add to it", async () => {
+    const use = "class Job\n  def run\n    Shop::Order\n    Minitest::Test\n    Wide\n  end\nend\n";
+    const wide = Object.fromEntries([1, 2, 3, 4].map((n) => [`ext/wide${n}.rb`, `class Wide\n  def m${n}; end\nend\n`]));
+    expect(
+      await edgesOf("imports", {
+        "app/job.rb": use,
+        "lib/shop/order.rb": "module Shop\n  class Order\n  end\nend\n",
+        "lib/shop/order_extras.rb": "module Shop\n  class Order\n    def extra; end\n  end\nend\n",
+        "test/helper.rb": "class Minitest::Test\n  def app; end\nend\n",
+        "test/contest.rb": "class Minitest::Test\n  def self.test; end\nend\n",
+        ...wide,
+      }),
+    ).toEqual(["app/job.rb -> ext/wide1.rb", "app/job.rb -> lib/shop/order.rb", "app/job.rb -> test/contest.rb", "app/job.rb -> test/helper.rb"]);
+  });
+
+  it("counts class << self, a def in a block of a class body and ENV.fetch without brackets, but not a def in a block of a script", async () => {
+    const facts = await extractFile(
+      "a.rb",
+      'module Concern\n  class_methods do\n    def scoped; end\n  end\n\n  class << self\n    def build; end\n  end\n\n  class << other\n    def lost; end\n  end\nend\n\ndescribe "x" do\n  def helper; end\nend\n\nENV.fetch "REGION"\ntext = <<~TEXT\n  ENV["IN_TEXT"]\nTEXT\n',
+    );
+    expect(facts.symbols.map((symbol) => symbol.name)).toEqual(["Concern", "Concern.scoped", "Concern.build"]);
+    expect(facts.envs.map((env) => env.name)).toEqual(["REGION"]);
+  });
+
+  it("links a doc that names a Ruby class by the last part of its name", async () => {
+    expect(await edgesOf("documents", { "docs/notes.md": "See `Policy`.\n", "lib/returns/policy.rb": "module Returns\n  class Policy\n  end\nend\n" })).toEqual(["docs/notes.md -> lib/returns/policy.rb#Returns::Policy"]);
+  });
+});

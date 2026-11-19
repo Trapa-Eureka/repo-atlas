@@ -10,56 +10,66 @@ exports[`Atlas on the sample repository > draws a stable Mermaid overview 1`] = 
   n5["notify/src/mailer.rs"]
   n6["notify/src/main.rs"]
   n7["notify/src/outbox.rs"]
-  n8["scripts/report.py"]
-  n9["shipping/src/main/java/com/acme/shipping/Labels.java"]
-  n10["shipping/src/main/java/com/acme/shipping/ShipmentService.java"]
-  n11["shipping/src/main/java/com/acme/shipping/ShippingApp.java"]
-  n12["shipping/src/main/java/com/acme/shipping/store/ShipmentRepository.java"]
-  n13["src/api/handler.ts"]
-  n14["src/db/client.ts"]
-  n15["src/db/schema.sql"]
-  n16["src/index.ts"]
-  n17["src/orders/service.ts"]
-  n18["src/users/repo.ts"]
-  n19["web/App.tsx"]
-  n20["web/OrderList.tsx"]
-  n21[("invoices")]
-  n22[("notifications")]
-  n23[("orders")]
-  n24[("shipments")]
-  n25[("users")]
+  n8["returns/bin/run.rb"]
+  n9["returns/lib/returns.rb"]
+  n10["returns/lib/returns/policy.rb"]
+  n11["returns/lib/returns/store.rb"]
+  n12["scripts/report.py"]
+  n13["shipping/src/main/java/com/acme/shipping/Labels.java"]
+  n14["shipping/src/main/java/com/acme/shipping/ShipmentService.java"]
+  n15["shipping/src/main/java/com/acme/shipping/ShippingApp.java"]
+  n16["shipping/src/main/java/com/acme/shipping/store/ShipmentRepository.java"]
+  n17["src/api/handler.ts"]
+  n18["src/db/client.ts"]
+  n19["src/db/schema.sql"]
+  n20["src/index.ts"]
+  n21["src/orders/service.ts"]
+  n22["src/users/repo.ts"]
+  n23["web/App.tsx"]
+  n24["web/OrderList.tsx"]
+  n25[("invoices")]
+  n26[("notifications")]
+  n27[("orders")]
+  n28[("returns")]
+  n29[("shipments")]
+  n30[("users")]
   n0 -->|imports| n1
   n0 -->|imports| n2
-  n2 -->|reads_table| n21
+  n2 -->|reads_table| n25
   n6 -->|imports| n5
   n6 -->|imports| n7
-  n7 -->|reads_table| n22
-  n8 -->|imports| n3
-  n8 -->|imports| n4
-  n8 -->|reads_table| n23
-  n8 -->|reads_table| n25
-  n10 -->|imports| n9
-  n10 -->|imports| n12
-  n11 -->|imports| n10
-  n11 -->|imports| n12
-  n12 -->|writes_table| n24
-  n13 -->|imports| n16
-  n13 -->|imports| n17
-  n13 -->|imports| n18
-  n15 -->|defines_table| n23
-  n15 -->|defines_table| n25
-  n15 -->|reads_table| n25
-  n16 -->|imports| n17
-  n16 -->|imports| n18
-  n17 -->|imports| n14
-  n17 -->|imports| n18
-  n17 -->|reads_table| n23
-  n17 -->|writes_table| n23
-  n17 -->|reads_table| n25
-  n18 -->|imports| n14
-  n18 -->|reads_table| n25
-  n18 -->|writes_table| n25
-  n19 -->|imports| n20
-  n20 -->|imports| n18
+  n7 -->|reads_table| n26
+  n8 -->|imports| n9
+  n9 -->|imports| n10
+  n9 -->|imports| n11
+  n11 -->|reads_table| n27
+  n11 -->|writes_table| n28
+  n12 -->|imports| n3
+  n12 -->|imports| n4
+  n12 -->|reads_table| n27
+  n12 -->|reads_table| n30
+  n14 -->|imports| n13
+  n14 -->|imports| n16
+  n15 -->|imports| n14
+  n15 -->|imports| n16
+  n16 -->|writes_table| n29
+  n17 -->|imports| n20
+  n17 -->|imports| n21
+  n17 -->|imports| n22
+  n19 -->|defines_table| n27
+  n19 -->|defines_table| n30
+  n19 -->|reads_table| n30
+  n20 -->|imports| n21
+  n20 -->|imports| n22
+  n21 -->|imports| n18
+  n21 -->|imports| n22
+  n21 -->|reads_table| n27
+  n21 -->|writes_table| n27
+  n21 -->|reads_table| n30
+  n22 -->|imports| n18
+  n22 -->|reads_table| n30
+  n22 -->|writes_table| n30
+  n23 -->|imports| n24
+  n24 -->|imports| n22
 "
 `;

@@ -27,8 +27,8 @@ const relation = (result: ReturnType<Atlas["context"]>, name: string) => names(r
 describe("Atlas on the sample repository", () => {
   it("indexes every supported file and nothing else", async () => {
     const atlas = await Atlas.open(root);
-    expect(atlas.summary).toMatchObject({ files: 23, parsed: 23, unchanged: 0, failed: [], unresolvedImports: 0, relinked: true });
-    expect(atlas.stats().nodes).toEqual({ file: 23, symbol: 41, table: 5, env: 5, module: 3 });
+    expect(atlas.summary).toMatchObject({ files: 27, parsed: 27, unchanged: 0, failed: [], unresolvedImports: 0, relinked: true });
+    expect(atlas.stats().nodes).toEqual({ file: 27, symbol: 51, table: 6, env: 6, module: 4 });
     atlas.close();
   });
 
@@ -56,10 +56,23 @@ describe("Atlas on the sample repository", () => {
     atlas.close();
   });
 
+  it("finds a Ruby class by the last part of its name, and links its calls across files", async () => {
+    const atlas = await Atlas.open(root);
+    expect(atlas.target("Policy").id).toBe("sym:returns/lib/returns/policy.rb#Returns::Policy");
+    expect(names(atlas.search("store", { kind: "symbol" })).slice(0, 2)).toContain("sym:returns/lib/returns/store.rb#Returns::Store");
+    expect(relation(atlas.context("Returns.process"), "calls")).toEqual([
+      "sym:returns/lib/returns/policy.rb#Returns::Policy.allowed?",
+      "sym:returns/lib/returns/store.rb#Returns::Store",
+      "sym:returns/lib/returns/store.rb#Returns::Store.find_order",
+      "sym:returns/lib/returns/store.rb#Returns::Store.record",
+    ]);
+    atlas.close();
+  });
+
   it("does not mistake prose or SQL functions for tables", async () => {
     const atlas = await Atlas.open(root);
-    expect(names(atlas.search("", { kind: "table" })).sort()).toEqual(["table:invoices", "table:notifications", "table:orders", "table:shipments", "table:users"]);
-    expect(names(atlas.export().nodes.filter((node) => node.kind === "table"))).toEqual(["table:invoices", "table:notifications", "table:orders", "table:shipments", "table:users"]);
+    expect(names(atlas.search("", { kind: "table" })).sort()).toEqual(["table:invoices", "table:notifications", "table:orders", "table:returns", "table:shipments", "table:users"]);
+    expect(names(atlas.export().nodes.filter((node) => node.kind === "table"))).toEqual(["table:invoices", "table:notifications", "table:orders", "table:returns", "table:shipments", "table:users"]);
     atlas.close();
   });
 
@@ -106,12 +119,12 @@ describe("Atlas on the sample repository", () => {
     const atlas = await Atlas.open(root);
     const page = atlas.view({ focus: "users" });
     atlas.close();
-    expect(page).toMatchObject({ nodes: 77, edges: 126 });
+    expect(page).toMatchObject({ nodes: 94, edges: 152 });
     expect(page.html).not.toMatch(/(?:src|href)=["']?https?:/);
     const embedded = /window\.ATLAS = (.*);<\/script>/.exec(page.html)?.[1] ?? "";
     const data = JSON.parse(embedded) as { nodes: unknown[][]; edges: number[][]; edgeKinds: string[]; focus: string };
     expect(data.focus).toBe("table:users");
-    expect(data.nodes).toHaveLength(77);
+    expect(data.nodes).toHaveLength(94);
     expect(data.edges.every(([src, dst, kind]) => data.nodes[src ?? -1] !== undefined && data.nodes[dst ?? -1] !== undefined && data.edgeKinds[kind ?? -1] !== undefined)).toBe(true);
   });
 
@@ -120,7 +133,7 @@ describe("Atlas on the sample repository", () => {
     first.close();
 
     const unchanged = await Atlas.open(root);
-    expect(unchanged.summary).toMatchObject({ parsed: 0, unchanged: 23, relinked: false, nodes: 77 });
+    expect(unchanged.summary).toMatchObject({ parsed: 0, unchanged: 27, relinked: false, nodes: 94 });
     unchanged.close();
 
     const file = join(root, "src/users/repo.ts");
@@ -130,7 +143,7 @@ describe("Atlas on the sample repository", () => {
     rmSync(join(root, "web/App.tsx"));
 
     const changed = await Atlas.open(root);
-    expect(changed.summary).toMatchObject({ files: 22, parsed: 1, unchanged: 21, removed: 1, relinked: true });
+    expect(changed.summary).toMatchObject({ files: 26, parsed: 1, unchanged: 25, removed: 1, relinked: true });
     expect(names(changed.search("removeUser"))).toEqual(["sym:src/users/repo.ts#removeUser"]);
     expect(changed.search("App.tsx")).toEqual([]);
     changed.close();
@@ -168,12 +181,12 @@ describe("CLI", () => {
     const result = await atlas("view", "--focus", "findUser");
     expect(result.code).toBe(0);
     expect(result.out).toBe(`${join(root, ".atlas", "view.html")}\n`);
-    expect(result.err).toContain("77 nodes and 126 relations");
+    expect(result.err).toContain("94 nodes and 152 relations");
     expect(readFileSync(join(root, ".atlas", "view.html"), "utf8")).toContain('"focus":"sym:src/users/repo.ts#findUser"');
 
     const elsewhere = join(root, "graph.html");
     const json = await atlas("--json", "view", "--out", elsewhere);
-    expect(JSON.parse(json.out)).toEqual({ file: elsewhere, nodes: 77, edges: 126 });
+    expect(JSON.parse(json.out)).toEqual({ file: elsewhere, nodes: 94, edges: 152 });
     expect(readFileSync(elsewhere, "utf8").startsWith("<!doctype html>")).toBe(true);
   });
 

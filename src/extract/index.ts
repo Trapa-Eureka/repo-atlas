@@ -1,15 +1,16 @@
 import { basename, extname } from "node:path";
 import type { Node } from "web-tree-sitter";
-import { extractGo, extractJava, extractPython, extractRust, extractScript } from "./code.js";
+import { extractGo, extractJava, extractPython, extractRuby, extractRust, extractScript } from "./code.js";
 import { emptyFacts, type FileFacts, type Language, type TableFact } from "./facts.js";
 import { parserFor, type Grammar } from "./parser.js";
 import { cteNamesIn, tablesInSql } from "./sql.js";
 import { envDeclarations, envUses, markdownRefs } from "./text.js";
 
+export { rubyUnderscore } from "./code.js";
 export type { CallFact, DocRefFact, EnvFact, ExportFact, FileFacts, ImportFact, ImportedName, Language, LocalFact, SymbolFact, TableFact } from "./facts.js";
 
 /** Bump when extraction output changes, so existing indexes re-parse every file. */
-export const EXTRACTOR_VERSION = 6;
+export const EXTRACTOR_VERSION = 7;
 
 const BY_EXTENSION: Record<string, Language> = {
   ".ts": "typescript",
@@ -24,6 +25,8 @@ const BY_EXTENSION: Record<string, Language> = {
   ".go": "go",
   ".java": "java",
   ".rs": "rust",
+  ".rb": "ruby",
+  ".rake": "ruby",
   ".sql": "sql",
   ".md": "markdown",
   ".mdx": "markdown",
@@ -42,13 +45,13 @@ export function languageOf(path: string): Language | null {
 function dedupeTables(tables: TableFact[]): TableFact[] {
   const seen = new Map<string, TableFact>();
   for (const table of tables) {
-    const key = `${table.op}:${table.name}`;
+    const key = `${table.op}:${table.name}:${table.inferred ? 1 : 0}`;
     if (!seen.has(key)) seen.set(key, table);
   }
   return [...seen.values()];
 }
 
-const TEXT_NODES = new Set(["comment", "string", "template_string", "string_fragment", "string_content", "regex", "interpreted_string_literal", "raw_string_literal", "string_literal", "line_comment", "block_comment"]);
+const TEXT_NODES = new Set(["comment", "string", "template_string", "string_fragment", "string_content", "regex", "interpreted_string_literal", "raw_string_literal", "string_literal", "line_comment", "block_comment", "heredoc_body"]);
 const CODE_INSIDE_TEXT = new Set(["template_substitution", "interpolation"]);
 
 /** Whether the source at `offset` is code, as opposed to the inside of a string or a comment. */
@@ -68,6 +71,7 @@ async function extractCode(source: string, facts: FileFacts, grammar: Grammar): 
     if (grammar === "go") extractGo(tree.rootNode, facts);
     else if (grammar === "java") extractJava(tree.rootNode, facts);
     else if (grammar === "rust") extractRust(tree.rootNode, facts);
+    else if (grammar === "ruby") extractRuby(tree.rootNode, facts);
     else if (grammar === "python") extractPython(tree.rootNode, facts);
     else extractScript(tree.rootNode, facts);
     // `process.env.X` in a test title or a comment is a mention, not a use.
@@ -90,6 +94,7 @@ export async function extractFile(path: string, source: string): Promise<FileFac
     case "go":
     case "java":
     case "rust":
+    case "ruby":
       await extractCode(source, facts, language);
       if (facts.tables.some((table) => table.op === "read")) {
         const ctes = cteNamesIn(source);

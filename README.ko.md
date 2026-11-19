@@ -26,11 +26,11 @@ Repo Atlas는 이런 관계를 질의할 수 있는 그래프 하나에 모아 �
 
 ### 실제 화면
 
-아래 그림은 모두 실제 출력이며, 이 저장소에 들어 있는 작은 샘플 저장소 `fixtures/shop`(TypeScript, TSX, Python, Go, Java, Rust, SQL, Markdown)에서 캡처했습니다. 손댄 곳은 하나입니다. 긴 폴더 경로를 `~/shop`으로 줄였습니다.
+아래 그림은 모두 실제 출력이며, 이 저장소에 들어 있는 작은 샘플 저장소 `fixtures/shop`(TypeScript, TSX, Python, Go, Java, Rust, Ruby, SQL, Markdown)에서 캡처했습니다. 손댄 곳은 하나입니다. 긴 폴더 경로를 `~/shop`으로 줄였습니다.
 
 **저장소 인덱싱** (Phase 1, 2). 두 번째 실행에서는 바뀐 파일이 없어서 아무것도 다시 파싱하지 않습니다.
 
-<img src="assets/index.png" alt="터미널: atlas index가 파일 23개를 노드 77개와 엣지 126개로 파싱하고, 두 번째 실행은 0개를 파싱하며, atlas stats가 노드·엣지·언어·가장 많이 의존되는 파일을 보여 준다" width="720">
+<img src="assets/index.png" alt="터미널: atlas index가 파일 27개를 노드 94개와 엣지 152개로 파싱하고, 두 번째 실행은 0개를 파싱하며, atlas stats가 노드·엣지·언어·가장 많이 의존되는 파일을 보여 준다" width="720">
 
 **파일을 고치기 전 브리핑** (Phase 3). 무엇을 정의하고 쓰는지, 누가 이 파일을 쓰는지, 어떤 테이블을 건드리는지, 어떤 문서가 언급하는지 보여 줍니다.
 
@@ -83,11 +83,11 @@ flowchart LR
 
 | 기능 | 상태 |
 |---|---|
-| `atlas index`: TypeScript, TSX, JavaScript, Python, Go, Java, Rust를 tree-sitter로 추출 | 완료 |
+| `atlas index`: TypeScript, TSX, JavaScript, Python, Go, Java, Rust, Ruby를 tree-sitter로 추출 | 완료 |
 | SQL 테이블: `.sql` 파일과 문자열 리터럴 안의 SQL을 정의 / 읽기 / 쓰기로 구분 | 완료 |
-| 환경변수 키: `process.env.X`, `import.meta.env.X`, `os.environ`, `os.getenv`, `os.Getenv`, `System.getenv`, `env::var` / `env!`, 그리고 `.env.example`에 선언된 키 | 완료 |
+| 환경변수 키: `process.env.X`, `import.meta.env.X`, `os.environ`, `os.getenv`, `os.Getenv`, `System.getenv`, `env::var` / `env!`, `ENV["X"]` / `ENV.fetch`, 그리고 `.env.example`에 선언된 키 | 완료 |
 | 문서: 파일, 함수, 테이블, 환경변수 키를 가리키는 Markdown 링크와 백틱 이름 | 완료 |
-| import 해석: 상대 경로, `.js`→`.ts`, index 파일, tsconfig `paths` / `baseUrl`, 워크스페이스 패키지 이름, Python 패키지와 상대 import, Go 모듈 경로(`go.mod`), Java 패키지, Rust 모듈과 크레이트(`Cargo.toml`) | 완료 |
+| import 해석: 상대 경로, `.js`→`.ts`, index 파일, tsconfig `paths` / `baseUrl`, 워크스페이스 패키지 이름, Python 패키지와 상대 import, Go 모듈 경로(`go.mod`), Java 패키지, Rust 모듈과 크레이트(`Cargo.toml`), Ruby `require`와 이름으로 쓰는 클래스 | 완료 |
 | 호출 해석: named·default·namespace import, 배럴 re-export, `this` / `self`, JSX 컴포넌트 | 완료 |
 | 증분 인덱싱: 바뀐 파일만 다시 파싱하고, 모든 질의가 먼저 인덱스를 갱신 | 완료 |
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, 모두 `--json` 지원 | 완료 |
@@ -96,7 +96,6 @@ flowchart LR
 | `atlas mcp`: 도구 6개를 가진 MCP 서버(stdio). `atlas init`이 `.mcp.json`에 등록 | 완료 |
 | 로컬 SQLite 인덱스(내장 `node:sqlite`, 컴파일할 것 없음) | 완료 |
 | npm 패키지 배포 (`repo-atlas-cli`) | 완료 |
-| 언어 추가(Ruby: 문법 파일은 의존성에 이미 포함) | 예정 |
 | IDE 연동 | 예정 |
 | 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 | 계획중 |
 
@@ -117,6 +116,7 @@ flowchart LR
 | Go | `.go` | 함수, 메서드, 타입. `go.mod`로 해석하는 import. 호출(타입이 적힌 값과 구조체 필드의 메서드 포함) |
 | Java | `.java` | 클래스, 인터페이스, enum, record와 그 메서드. import와 같은 패키지 사용. 필드·매개변수·상속을 거친 호출. `@Table` |
 | Rust | `.rs` | 함수, 구조체, enum, 트레이트, `impl` 메서드. `mod`와 `use` 경로, 글롭, `pub use`. 경로 호출, 타입이 적힌 값의 메서드, 매크로 안의 호출 |
+| Ruby | `.rb` `.rake` | 클래스, 모듈과 그 메서드, 최상위 메서드. `require`, `require_relative`, `autoload`, 이름으로 쓰는 클래스. `self`, 클래스, `.new`로 만든 값에 대한 호출. `create_table`, Active Record 모델의 테이블 |
 | SQL | `.sql`, 코드 문자열 안의 SQL | `CREATE` / `ALTER` / `INSERT` / `UPDATE` / `DELETE` / `FROM` / `JOIN` / `REFERENCES`, 그리고 `.from("table")` 쿼리 빌더 |
 | 설정 | `.env.example`, `.env.sample`, `.env.template` | 키 이름만 읽고 값은 읽지 않습니다. 실제 `.env` 파일은 열지 않습니다. |
 | 문서 | `.md` `.mdx` | 상대 링크와 `` `백틱` `` 이름 |
@@ -241,6 +241,7 @@ atlas init        # .mcp.json에 "repo-atlas"를 추가하고 다른 서버는 �
 - **Go에서는 폴더가 패키지입니다.** 저장소 안의 패키지를 import하면, import한 쪽이 실제로 쓰는 것을 선언한 파일들로 엣지가 생깁니다(상수, 함수, 또는 타입과 그 메서드가 들어 있는 파일들. 이름의 위치를 알 수 없으면 패키지의 모든 파일). 메서드는 타입이 적힌 값(매개변수, 리시버, `var x T`, `x := T{}`, 구조체 필드, 임베드된 타입)에서만 따라가고, 호출 결과(`x := NewT()`)나 인터페이스를 거친 호출은 따라가지 않습니다. 타입 변환(`ID(x)`)은 호출로 치지 않습니다. 빌드 태그는 무시하므로 플랫폼별로 같은 이름을 선언한 두 파일을 구분하지 못하고, `go mod vendor`가 만든 `vendor/` 폴더는 건너뜁니다. 공개 Go 저장소 4개(gin, cobra, miniflux, pocketbase: Go 파일 1,037개)에서 확인했습니다. 표본 엣지 86개가 모두 맞았고 해석되지 않은 로컬 import는 없었습니다. Go의 빠진 엣지는 재지 않았습니다.
 - **Java에서는 클래스를 패키지와 이름으로 찾습니다.** 파일 위치는 상관없습니다. 같은 패키지의 클래스는 import 없이 쓰므로, 파일은 import 여부와 관계없이 자신이 이름을 적은 모든 클래스의 파일에 의존합니다. 메서드는 필드·매개변수·지역 변수에 적힌 타입으로, 상위 클래스와 인터페이스를 거쳐, 그리고 정적 호출(`Labels.format()`)에서 따라갑니다. 인터페이스 타입의 값에서 부른 메서드는 구현체가 아니라 인터페이스의 메서드로 연결됩니다. 호출 결과(`a.b().c()`), 오버로드(모두 한 심볼), 익명 클래스 안에서 리시버 없이 부른 호출, 리플렉션, 애너테이션 기반 연결은 따라가지 않습니다. `@Table(name = ...)`은 테이블을 정의하고, native가 아닌 `@Query`는 JPQL이라 SQL로 읽지 않습니다. 공개 Java 저장소 4개(spring-petclinic, gson, jsoup, commons-lang: Java 파일 1,181개)에서 확인했습니다. 표본 엣지 103개 중 1개가 틀렸고(JPQL 엔티티 이름을 테이블로 읽음) 고쳤습니다. Java의 빠진 엣지는 재지 않았습니다.
 - **Rust에서는 경로를 모듈 트리를 따라 해석합니다.** `mod x;`와 모든 `use`는 경로가 가리키는 파일로 엣지가 됩니다(`pub use`로 넘겨받은 항목이면 실제로 선언한 파일). `crate::`, `self::`, `super::`, 글롭, 그리고 `Cargo.toml`에 이름이 있는 저장소 안의 다른 크레이트를 모두 따라갑니다. 호출은 경로(`a::b::f()`, `Type::new()`), `self`, `self.field`, 그리고 타입이 적힌 값에서 따라갑니다. 타입이 적힌 값은 타입이 있는 매개변수, `let x: T`, `let x = T { .. }`, 그리고 `open`이 `T`를 돌려줄 때의 `let x = T::open()`입니다(`Result`나 `Option`으로 감싸 돌려주면 `?`가 붙은 경우). 메서드는 타입을 선언한 파일이나 호출한 파일의 `impl`, 또는 타입의 파일에서 구현한 트레이트에서 찾습니다. 그 밖의 방식으로 추론되는 값, 트레이트 바운드 하나를 넘는 제네릭, 제3의 파일에 있는 `impl`, 항목을 만드는 매크로, `#[path]`와 `cfg` 속성은 따라가지 않습니다. 인라인 `mod name { }` 안의 항목은 파일 최상위에 있는 것처럼 이름 붙이고, 한 타입에 같은 이름의 메서드를 정의한 `impl` 블록이 둘이면 첫 번째만 남깁니다. 매크로 안에서는 `name(...)`과 `path::name(...)` 형태의 호출만 봅니다. 공개 Rust 저장소 4개(fd, mini-redis, ripgrep, just: Rust 파일 432개)에서 확인했습니다. 표본 엣지 102개가 모두 맞았고 해석되지 않은 `use`는 없었습니다. Rust의 빠진 엣지는 재지 않았습니다.
+- **Ruby에서는 클래스를 이름으로 찾습니다.** Ruby 코드는 대부분 `require`가 아니라 이름으로 불러오기 때문입니다(Rails 자동 로딩, gem 맨 위의 `require` 하나). 파일은 자신이 이름을 적은 모든 클래스·모듈·상수의 파일에 의존하며, 이름은 Ruby와 같은 순서로 그 자리를 둘러싼 네임스페이스에서 찾습니다. 여러 파일에서 여는 클래스는 그 이름을 딴 파일에 있는 것으로 봅니다(`Shop::Order`는 `shop/order.rb`). 클래스를 거쳐 읽는 상수(`Order::LIMIT`)는 그 상수를 대입한 파일로 연결하며, 부모 클래스나 include한 모듈에서 온 상수도 같습니다. `require`는 `lib/`, `test/`, `spec/` 폴더에서 찾고, 그 밖의 이름은 외부 gem으로 봅니다. 호출은 리시버가 없거나 `self`인 경우(부모 클래스와 `include` / `extend` / `prepend`를 거쳐), 클래스에 대한 호출(`Order.find`), 그리고 파일이 `.new`로 직접 만든 값(지역 변수, 인스턴스 변수, 그 변수의 `attr_reader`)에 대한 호출을 따라갑니다. 한 클래스의 인스턴스 메서드와 클래스 메서드는 같은 이름을 쓰므로 `Order.total`은 `def total`과 `def self.total`을 함께 가리킵니다. 따라가지 않는 것: 매개변수나 호출 결과에 대한 메서드, `send`와 `method_missing`, 코드가 만들어 내는 메서드(`define_method`, `delegate`, Rails의 연관·scope), 경로를 계산해서 넘기는 `require`. 다른 클래스를 감싸기만 하는 모듈은 네임스페이스로 보고 심볼로 만들지 않습니다. Active Record 모델은 관례상 그 이름이 가리키는 테이블을 읽는 것으로 보되, 저장소가 그 이름의 테이블을 정의할 때만 연결합니다(`db/schema.rb`나 마이그레이션의 `create_table`). Active Record 메서드로 쓴 질의(`User.where(...)`)는 테이블 사용으로 읽지 않습니다. 공개 Ruby 저장소 4개(sinatra, jekyll, lobsters, mastodon, Ruby 파일 4,199개. 가장 큰 저장소는 전체 4,302개 파일에 약 4초)에서 확인했습니다. 첫 표본에서 잘못된 엣지 네 종류가 나왔고 모두 고쳤습니다. 보간이 들어간 `ALTER TABLE #{name}`에서 테이블을 읽은 것, 컬럼 목록이 붙은 CTE를 테이블로 읽은 것, 네임스페이스가 있는 모델에 접두사 없는 테이블을 준 것, gem의 클래스를 그 gem의 모듈을 다시 여는 파일에 둔 것입니다. 그 뒤에 뽑은 엣지 120개는 모두 맞았습니다. Ruby도 빠진 엣지는 측정하지 않았습니다.
 - Python 절대 import는 저장소 루트에서 먼저 찾고, 없으면 유일한 경로 접미사로 찾습니다. 모듈 경로가 같은 패키지가 둘이면 해석하지 않습니다.
 - 문서는 상대 링크와 백틱 이름으로만 연결합니다. 백틱 안의 흔한 단어가 마침 그 이름을 가진 유일한 함수라면 연결됩니다. 가장 덜 믿을 만한 엣지 종류입니다(아래 수치 참고).
 - 최상위 함수, 클래스, 그 메서드(클래스 프로퍼티에 넣은 화살표 함수 포함)만 심볼입니다. 중첩 함수는 그것을 감싼 함수의 것으로 치고, 일반 객체의 멤버는 심볼이 아닙니다.
@@ -315,11 +316,11 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
 - [x] **Phase 4**: 에이전트: MCP 서버, `atlas init`
 - [ ] **Phase 5**: 릴리스
   - [x] npm 패키지 ([`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli))
-  - [ ] 언어 추가
+  - [x] 언어 추가
     - [x] Go
     - [x] Java
     - [x] Rust
-    - [ ] Ruby
+    - [x] Ruby
   - [x] 로컬 HTML 뷰어 (`atlas view`)
   - [ ] IDE 연동
 - [ ] **Phase 6**: 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 (계획중)

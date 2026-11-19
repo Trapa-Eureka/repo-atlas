@@ -1,4 +1,4 @@
-export type Language = "typescript" | "tsx" | "javascript" | "python" | "go" | "java" | "rust" | "sql" | "markdown" | "env";
+export type Language = "typescript" | "tsx" | "javascript" | "python" | "go" | "java" | "rust" | "ruby" | "sql" | "markdown" | "env";
 
 export interface SymbolFact {
   /** Qualified inside the file: `name` for top-level, `Class.method` for members. */
@@ -10,7 +10,7 @@ export interface SymbolFact {
   isDefault: boolean;
   /** For a class: the name it extends, as written in this file. */
   extends?: string;
-  /** For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. For a Rust type: the traits implemented for it in its own file. */
+  /** For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. For a Rust type: the traits implemented for it in its own file. For a Ruby class or module: what it includes, extends or prepends. */
   embeds?: string[];
   /** For a Rust method: the type it returns, `?T` when wrapped in `Result` or `Option`. Says whether `let x = T::new()` makes `x` a `T`. */
   returns?: string;
@@ -23,6 +23,7 @@ export interface SymbolFact {
  * `export default a`, `module.exports = a`. For Go: a package-level constant or variable, which is
  * not a symbol but still says which file of the package a user of that name depends on. For Rust:
  * an inline module, constant, static or macro, so that a path naming it is known to lead somewhere.
+ * For Ruby: a constant that is not a class, under its full name (`Shop::LIMIT`).
  */
 export interface ExportFact {
   /** The name seen from outside: `b`, `default`, or `default.b` for a member of a default-exported object. */
@@ -77,7 +78,10 @@ export interface ImportFact {
 
 export interface CallFact {
   callee: string;
-  /** `obj` in `obj.callee()`, `this` / `self` / `super`, `this.field` in `this.field.callee()`, `new` for `new Callee()` in Java, or a Rust path ending in `::` for `a::b::callee()`. */
+  /**
+   * `obj` in `obj.callee()`, `this` / `self` / `super`, `this.field` in `this.field.callee()`, `new` for `new Callee()` in Java,
+   * a Rust path ending in `::` for `a::b::callee()`, or in Ruby `@field`, a constant (`A::B`) or `A::B.new` for a call on a fresh instance.
+   */
   receiver: string | null;
   line: number;
   /** Where on the line the call starts, to tell `run(x, (run) => 1)` apart from a call inside the inner function. */
@@ -90,6 +94,10 @@ export interface TableFact {
   name: string;
   op: TableOp;
   line: number;
+  /** Ruby: the table an Active Record model has by its name alone. It counts only when the repository defines a table of that name. */
+  inferred?: boolean;
+  /** For an inferred table: the name to try when the first is not defined (`settings` after `web_settings` for `Web::Setting`). */
+  otherwise?: string;
 }
 
 export interface EnvFact {
@@ -109,8 +117,13 @@ export interface FileFacts {
   language: Language;
   /** Go: the name in the `package` clause. Files of one folder can belong to two packages (`x` and `x_test`). Java: the declared package. */
   package?: string;
-  /** Java: the type names the file mentions, with the line of the first mention. A class of the same package is used without an import. */
-  uses?: { name: string; line: number }[];
+  /**
+   * Java: the type names the file mentions, with the line of the first mention. A class of the same package is used without an import.
+   * Ruby: the constants the file mentions, once per namespace. A class is used without naming its file anywhere.
+   */
+  uses?: { name: string; line: number; /** Ruby: the parent in `class A < B`, which is looked up from outside the class that starts on that line. */ outside?: boolean }[];
+  /** Ruby: the lines of each class and module body, with the full names of the namespaces around it, innermost first. A constant is looked up in each in turn. */
+  namespaces?: { names: string[]; line: number; endLine: number }[];
   symbols: SymbolFact[];
   imports: ImportFact[];
   calls: CallFact[];

@@ -1158,3 +1158,444 @@ export function extractRust(root: Node, facts: FileFacts): void {
     if (symbol && !symbol.embeds?.includes(trait)) (symbol.embeds ??= []).push(trait);
   }
 }
+
+// ---------- Ruby ----------
+
+interface RubyScope {
+  /** Full names of the classes and modules around, innermost first: where a constant is looked up. */
+  nesting: string[];
+  /** The class or module a `def` here is a method of. Null at the top of a file. */
+  owner: string | null;
+  inDef: boolean;
+  inBlock: boolean;
+  /** The method around, which is what `super` calls in the parent. */
+  method: string | null;
+  /** Names that are local variables somewhere in the method (or body) around. A bare name outside this set is a call. */
+  variables: Set<string>;
+  /** The variables that are given `Type.new` somewhere, so that another assignment has to be noted as hiding it. */
+  typed: Set<string>;
+  /** `attr_reader` names of the class around: `repo.find` is then `@repo.find`. */
+  attrs: Set<string>;
+  /** Last line of the innermost method or block. */
+  scopeEnd: number;
+  /** Last line of the method (or body) around: how far a name that stops being a known instance stays unknown. */
+  bodyEnd: number;
+  /** Instance variables the classes around hold a known instance in. A class inside does not share them. */
+  fields: Set<string>;
+  /** The constants already noted, by namespace. One set for the whole file. */
+  seen: Set<string>;
+}
+
+const RUBY_OWN_SCOPE = new Set(["method", "singleton_method", "class", "module", "singleton_class"]);
+const RUBY_REQUIRES = new Set(["require", "require_relative", "autoload"]);
+const RUBY_MIXINS = new Set(["include", "extend", "prepend"]);
+const RUBY_RECORD_BASES = new Set(["ApplicationRecord", "ActiveRecord::Base"]);
+const RUBY_CLASS_MAKERS = new Set(["Struct.new", "Class.new", "Data.define"]);
+
+/** `A::B` from a constant or a chain of them, `::A` when it is written from the top. Null for anything looked up at run time (`self::A`, `x::A`). */
+function rubyConstant(node: Node | null | undefined): string | null {
+  if (node?.type === "constant") return node.text;
+  if (node?.type !== "scope_resolution") return null;
+  const name = node.childForFieldName("name");
+  if (name?.type !== "constant") return null;
+  const scope = node.childForFieldName("scope");
+  if (!scope) return `::${name.text}`;
+  const outer = rubyConstant(scope);
+  return outer ? `${outer}::${name.text}` : null;
+}
+
+/** `T` from `T.new(...)`. */
+function rubyNewType(value: Node | null | undefined): string | null {
+  if (value?.type !== "call" || value.childForFieldName("method")?.text !== "new") return null;
+  return rubyConstant(value.childForFieldName("receiver"));
+}
+
+function rubyUse(node: Node, facts: FileFacts, scope: RubyScope, outside = false): void {
+  const name = rubyConstant(node);
+  if (!name) return;
+  // The same name can mean two things in two namespaces of one file, so it is kept once for each.
+  const key = `${scope.nesting[0] ?? ""}\u0000${name}`;
+  if (scope.seen.has(key)) return;
+  scope.seen.add(key);
+  (facts.uses ??= []).push({ name, line: line(node), ...(outside ? { outside: true } : {}) });
+}
+
+/** The names a parameter list binds. Default values are not names. */
+function rubyParameterNames(parameters: Node | null | undefined, into: Set<string>): void {
+  for (const parameter of parameters ? namedChildren(parameters) : []) {
+    if (parameter.type === "identifier") into.add(parameter.text);
+    else if (parameter.type === "destructured_parameter") rubyParameterNames(parameter, into);
+    else {
+      const name = parameter.childForFieldName("name");
+      if (name) into.add(name.text);
+    }
+  }
+}
+
+function rubyAssigned(left: Node | null | undefined, into: Set<string>): void {
+  if (left?.type === "identifier") into.add(left.text);
+  else if (left && (left.type === "left_assignment_list" || left.type === "destructured_left_assignment" || left.type === "rest_assignment")) {
+    for (const child of namedChildren(left)) rubyAssigned(child, into);
+  }
+}
+
+const RUBY_PATTERNS = new Set(["in_clause", "test_pattern", "match_pattern"]);
+
+/** The names a pattern binds: `in {name:, port: Integer => port}`, `in [first, *rest]`. */
+function rubyPatternNames(pattern: Node, into: Set<string>): void {
+  if (pattern.type === "identifier") into.add(pattern.text);
+  else if (pattern.type === "keyword_pattern" && !pattern.childForFieldName("value")) into.add(pattern.childForFieldName("key")?.text ?? "");
+  for (const child of namedChildren(pattern)) rubyPatternNames(child, into);
+}
+
+/** The local variables of one method or body: its parameters and everything assigned in it, blocks included. What a block takes as parameters is known only inside the block. */
+function rubyVariables(node: Node, variables: Set<string>, typed: Set<string>): void {
+  for (const child of namedChildren(node)) {
+    if (RUBY_OWN_SCOPE.has(child.type)) continue;
+    if (child.type === "assignment" || child.type === "operator_assignment") {
+      const left = child.childForFieldName("left");
+      rubyAssigned(left, variables);
+      if (left?.type === "identifier" && rubyNewType(child.childForFieldName("right"))) typed.add(left.text);
+    } else if (child.type === "method_parameters") rubyParameterNames(child, variables);
+    else if (child.type === "exception_variable") rubyAssigned(namedChildren(child)[0], variables);
+    else if (child.type === "for") rubyAssigned(child.childForFieldName("pattern"), variables);
+    else if (RUBY_PATTERNS.has(child.type)) {
+      const pattern = child.childForFieldName("pattern");
+      if (pattern) rubyPatternNames(pattern, variables);
+    }
+    rubyVariables(child, variables, typed);
+  }
+}
+
+/** What a class body says about its instance variables and readers, in any of its methods. Nested classes speak for themselves. */
+function rubyClassState(node: Node, ivars: Map<string, Set<string>>, attrs: Set<string>): void {
+  for (const child of namedChildren(node)) {
+    if (child.type === "class" || child.type === "module") continue;
+    if (child.type === "assignment" || child.type === "operator_assignment") {
+      const left = child.childForFieldName("left");
+      const right = child.childForFieldName("right");
+      const note = (name: string, type: string) => {
+        const types = ivars.get(name) ?? new Set<string>();
+        ivars.set(name, types);
+        types.add(type);
+      };
+      if (left?.type === "instance_variable" && right?.type !== "nil") note(left.text, rubyNewType(right) ?? "?");
+      // `@a, @b = pair`: each gets something that cannot be told.
+      else if (left?.type === "left_assignment_list") for (const target of left.descendantsOfType("instance_variable")) if (target) note(target.text, "?");
+    } else if (child.type === "call" && !child.childForFieldName("receiver") && /^attr_(?:reader|accessor)$/.test(child.childForFieldName("method")?.text ?? "")) {
+      for (const argument of namedChildren(child.childForFieldName("arguments") ?? child)) if (argument.type === "simple_symbol") attrs.add(argument.text.slice(1));
+    }
+    rubyClassState(child, ivars, attrs);
+  }
+}
+
+/** `include M`, `extend M`, `prepend M` written directly in a class body. */
+function rubyMixins(body: Node | null): string[] {
+  const mixins: string[] = [];
+  for (const child of body ? namedChildren(body) : []) {
+    if (child.type !== "call" || child.childForFieldName("receiver") || !RUBY_MIXINS.has(child.childForFieldName("method")?.text ?? "")) continue;
+    for (const argument of namedChildren(child.childForFieldName("arguments") ?? child)) {
+      const name = rubyConstant(argument);
+      if (name) mixins.push(name);
+    }
+  }
+  return mixins;
+}
+
+const RUBY_UNCOUNTABLE = /(?:equipment|information|rice|money|species|series|fish|sheep|police|news|metadata)$/;
+const RUBY_PLURALS: [RegExp, string][] = [
+  [/(?<=^|_)person$/, "people"],
+  [/man$/, "men"],
+  [/child$/, "children"],
+  [/(quiz)$/, "$1zes"],
+  [/([^aeiouy]|qu)y$/, "$1ies"],
+  [/sis$/, "ses"],
+  [/(s|x|z|ch|sh)$/, "$1es"],
+  [/$/, "s"],
+];
+
+/** `OrderItem` → `order_item`, as Ruby names files and tables. */
+export const rubyUnderscore = (name: string): string => name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2").replace(/([a-z\d])([A-Z])/g, "$1_$2").toLowerCase();
+
+/** The table Active Record gives a model by default: `OrderItem` → `order_items`. A guess, to be checked against the tables the repository defines. */
+function rubyTableName(className: string): string {
+  const singular = rubyUnderscore(className.split("::").pop() ?? className);
+  if (RUBY_UNCOUNTABLE.test(singular)) return singular;
+  for (const [pattern, replacement] of RUBY_PLURALS) if (pattern.test(singular)) return singular.replace(pattern, replacement);
+  return singular;
+}
+
+/** Names bound to something that cannot be followed, from `node` on: they stop being the instance an earlier `x = T.new` made them. */
+function rubyHide(names: Iterable<string>, node: Node, facts: FileFacts, scope: RubyScope): void {
+  for (const name of names) {
+    if (scope.typed.has(name)) facts.locals.push({ name, kind: "other", line: endLine(node), endLine: scope.bodyEnd, column: node.endPosition.column });
+  }
+}
+
+/** `def`, `class` and `module` start with no local variables: what the code around them knows about a name does not hold inside. */
+function rubyGate(node: Node, facts: FileFacts, scope: RubyScope): void {
+  for (const name of scope.typed) facts.locals.push({ name, kind: "other", line: line(node), endLine: endLine(node), column: column(node) });
+}
+
+/** A plain string argument: no interpolation. */
+function rubyString(node: Node | null | undefined): string | null {
+  if (node?.type !== "string") return null;
+  const parts = namedChildren(node);
+  return parts.every((part) => part.type === "string_content") ? parts.map((part) => part.text).join("") : null;
+}
+
+function rubySymbolOrString(node: Node | null | undefined): string | null {
+  return node?.type === "simple_symbol" ? node.text.slice(1) : rubyString(node);
+}
+
+/** A class or module body: its symbol, its namespace, what its instance variables hold, then its contents. */
+function rubyBody(node: Node, body: Node | null, written: string, superclass: string | null, isModule: boolean, facts: FileFacts, scope: RubyScope): void {
+  const outer = scope.nesting[0];
+  const full = written.startsWith("::") ? written.slice(2) : outer ? `${outer}::${written}` : written;
+  const members = body ? namedChildren(body).filter((child) => child.type !== "comment") : [];
+  // `module Shop` around other classes, written in every file of the project, is a namespace and not a place.
+  const namespaceOnly = isModule && members.length > 0 && members.every((child) => child.type === "class" || child.type === "module" || (child.type === "assignment" && child.childForFieldName("left")?.type === "constant"));
+  if (!namespaceOnly) {
+    const mixins = rubyMixins(body);
+    addSymbol(facts, { name: full, kind: "class", line: line(node), endLine: endLine(node), exported: true, isDefault: false, ...(superclass ? { extends: superclass } : {}), ...(mixins.length > 0 ? { embeds: mixins } : {}) });
+  }
+  const nesting = [full, ...scope.nesting];
+  (facts.namespaces ??= []).push({ names: nesting, line: line(node), endLine: endLine(node) });
+  if (superclass && RUBY_RECORD_BASES.has(superclass.replace(/^::/, "")) && !/\b(?:table_name|abstract_class)\s*=/.test(body?.text ?? "")) {
+    // `Web::Setting` is `web_settings` when its module sets a table prefix, which is how Rails generates one, and `settings` when not.
+    const plain = rubyTableName(full);
+    const prefix = full.includes("::") ? `${full.slice(0, full.lastIndexOf("::")).split("::").map(rubyUnderscore).join("_")}_` : "";
+    facts.tables.push({ name: prefix + plain, op: "read", line: line(node), inferred: true, ...(prefix ? { otherwise: plain } : {}) });
+  }
+  if (!body) return;
+
+  const ivars = new Map<string, Set<string>>();
+  const attrs = new Set<string>();
+  rubyClassState(body, ivars, attrs);
+  const fields = new Set<string>();
+  for (const [name, types] of ivars) {
+    const [type] = types;
+    if (types.size !== 1 || !type || type === "?") continue;
+    fields.add(name);
+    facts.locals.push({ name, kind: "instance", type, line: line(node), endLine: endLine(node) });
+  }
+  // What a class around this one keeps in a variable of the same name is not what this one keeps there.
+  for (const name of scope.fields) if (!fields.has(name)) facts.locals.push({ name, kind: "other", line: line(node), endLine: endLine(node) });
+  rubyGate(node, facts, scope);
+  const variables = new Set<string>();
+  const typed = new Set<string>();
+  rubyVariables(body, variables, typed);
+  const inner: RubyScope = { nesting, owner: full, inDef: false, inBlock: false, method: null, variables, typed, attrs, scopeEnd: endLine(node), bodyEnd: endLine(node), fields: new Set([...scope.fields, ...fields]), seen: scope.seen };
+  for (const child of namedChildren(body)) walkRuby(child, facts, inner);
+}
+
+/** How the receiver of a call is written down for the linker, or null when nothing can be said about it. */
+function rubyReceiver(receiver: Node, scope: RubyScope): string | null {
+  switch (receiver.type) {
+    case "self":
+      return "self";
+    case "constant":
+    case "scope_resolution":
+      return rubyConstant(receiver);
+    case "instance_variable":
+      return receiver.text;
+    case "identifier":
+      // A name that is not a variable is a method of the object itself: followed when it is a reader of a field.
+      return scope.variables.has(receiver.text) ? receiver.text : scope.attrs.has(receiver.text) ? `@${receiver.text}` : null;
+    case "call": {
+      // `Service.new(order).call`, and `self.class.build` for a method of the class.
+      const type = rubyNewType(receiver);
+      if (type) return `${type}.new`;
+      return receiver.childForFieldName("receiver")?.type === "self" && receiver.childForFieldName("method")?.text === "class" ? "self" : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function walkRuby(node: Node, facts: FileFacts, scope: RubyScope): void {
+  const walkChildren = (parent: Node, inner: RubyScope = scope) => {
+    for (const child of namedChildren(parent)) walkRuby(child, facts, inner);
+  };
+  switch (node.type) {
+    case "class":
+    case "module": {
+      const written = rubyConstant(node.childForFieldName("name"));
+      if (!written || scope.inDef) break;
+      const parent = node.childForFieldName("superclass");
+      const superclass = parent ? rubyConstant(namedChildren(parent)[0]) : null;
+      // The parent is named before the class is opened: it is looked up from outside it.
+      if (parent && superclass) rubyUse(namedChildren(parent)[0] ?? parent, facts, scope, true);
+      else if (parent) walkChildren(parent);
+      rubyBody(node, node.childForFieldName("body"), written, superclass, node.type === "module", facts, scope);
+      return;
+    }
+    case "singleton_class":
+      // `class << self`: its methods are methods of the class around.
+      if (node.childForFieldName("value")?.type !== "self") return;
+      walkChildren(node.childForFieldName("body") ?? node);
+      return;
+    case "method":
+    case "singleton_method": {
+      const name = node.childForFieldName("name")?.text;
+      const object = node.childForFieldName("object");
+      if (!name || (object && object.type !== "self" && rubyConstant(object) !== scope.owner?.split("::").pop())) return;
+      if (!scope.inDef && scope.owner) {
+        addSymbol(facts, { name: `${scope.owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false });
+      } else if (!scope.inDef && !scope.inBlock) {
+        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: !name.startsWith("_"), isDefault: false });
+      }
+      const variables = new Set<string>();
+      const typed = new Set<string>();
+      rubyVariables(node, variables, typed);
+      rubyGate(node, facts, scope);
+      const inner: RubyScope = { ...scope, inDef: true, inBlock: false, method: name, variables, typed, scopeEnd: endLine(node), bodyEnd: endLine(node) };
+      for (const child of namedChildren(node)) if (child.id !== node.childForFieldName("name")?.id && child.id !== object?.id) walkRuby(child, facts, inner);
+      return;
+    }
+    case "method_parameters":
+    case "block_parameters":
+    case "lambda_parameters":
+    case "destructured_parameter":
+      // Only default values are code.
+      for (const parameter of namedChildren(node)) {
+        const value = parameter.childForFieldName("value");
+        if (value) walkRuby(value, facts, scope);
+        else if (parameter.type === "destructured_parameter") walkRuby(parameter, facts, scope);
+      }
+      return;
+    case "block":
+    case "do_block":
+    case "lambda": {
+      const taken = new Set<string>();
+      rubyParameterNames(node.childForFieldName("parameters"), taken);
+      // A parameter named like a variable of the method is another thing for as long as the block lasts.
+      for (const name of taken) if (scope.typed.has(name)) facts.locals.push({ name, kind: "other", line: line(node), endLine: endLine(node), column: column(node) });
+      walkChildren(node, { ...scope, inBlock: true, scopeEnd: endLine(node), variables: taken.size > 0 ? new Set([...scope.variables, ...taken]) : scope.variables });
+      return;
+    }
+    case "assignment":
+    case "operator_assignment": {
+      const left = node.childForFieldName("left");
+      const right = node.childForFieldName("right");
+      if (left?.type === "constant" && !scope.inDef && !scope.inBlock) {
+        const maker = right?.type === "call" ? `${right.childForFieldName("receiver")?.text ?? ""}.${right.childForFieldName("method")?.text ?? ""}` : "";
+        if (right && node.type === "assignment" && RUBY_CLASS_MAKERS.has(maker)) {
+          // `Point = Struct.new(:x, :y) do ... end`: a class, with the block as its body.
+          const parent = maker === "Class.new" ? rubyConstant(namedChildren(right.childForFieldName("arguments") ?? right)[0]) : null;
+          const made = right.childForFieldName("block");
+          const body = made ? (made.childForFieldName("body") ?? null) : null;
+          const given = right.childForFieldName("arguments");
+          if (given) walkRuby(given, facts, scope);
+          rubyBody(node, body, left.text, parent, false, facts, scope);
+          return;
+        }
+        const outer = scope.nesting[0];
+        facts.exports.push({ exported: outer ? `${outer}::${left.text}` : left.text, local: left.text });
+      } else if (left?.type === "identifier") {
+        const type = rubyNewType(right);
+        // The name means this from the end of the assignment on: `x = x.next` still reads the old one.
+        if (type) facts.locals.push({ name: left.text, kind: "instance", type, line: endLine(node), endLine: scope.scopeEnd, column: node.endPosition.column });
+        else rubyHide([left.text], node, facts, scope);
+      } else if (left?.type === "left_assignment_list") {
+        const names = new Set<string>();
+        rubyAssigned(left, names);
+        rubyHide(names, node, facts, scope);
+      } else if (left?.type === "call" && left.childForFieldName("receiver")?.type === "self" && left.childForFieldName("method")?.text === "table_name") {
+        const table = rubyString(right);
+        // The model says which table it is kept in. The table itself is defined by the schema.
+        if (table) facts.tables.push({ name: (table.split(".").pop() ?? table).toLowerCase(), op: "read", line: line(node) });
+      } else if (left && left.type !== "instance_variable" && left.type !== "left_assignment_list" && left.type !== "constant") {
+        // `a.b = c`, `a[i] = c`: the left side reads names too.
+        walkRuby(left, facts, scope);
+      }
+      if (right) walkRuby(right, facts, scope);
+      return;
+    }
+    case "call": {
+      const method = node.childForFieldName("method");
+      const receiver = node.childForFieldName("receiver");
+      const argumentList = node.childForFieldName("arguments");
+      const first = argumentList ? namedChildren(argumentList)[0] : undefined;
+      const at = { line: line(node), column: column(node) };
+      if (method?.type === "super") {
+        if (scope.method) facts.calls.push({ callee: scope.method, receiver: "super", ...at });
+      } else if (method && !receiver) {
+        if (RUBY_REQUIRES.has(method.text)) {
+          const path = rubyString(method.text === "autoload" ? namedChildren(argumentList ?? node)[1] : first);
+          // `require "./x"` is relative to where the program was started, which a file does not say.
+          const specifier = !path ? null : method.text === "require_relative" ? (path.startsWith(".") ? path : `./${path}`) : path.startsWith(".") ? null : path;
+          if (specifier) facts.imports.push({ specifier, names: [], reexport: false, star: false, line: line(node) });
+          return;
+        }
+        if (method.text === "create_table") {
+          const table = rubySymbolOrString(first);
+          if (table) facts.tables.push({ name: table.toLowerCase(), op: "define", line: line(node) });
+        }
+        if (method.type === "identifier") facts.calls.push({ callee: method.text, receiver: null, ...at });
+      } else if (method && receiver && (method.type === "identifier" || method.type === "constant")) {
+        const written = rubyReceiver(receiver, scope);
+        if (written) facts.calls.push({ callee: method.text, receiver: written, ...at });
+      }
+      for (const child of namedChildren(node)) if (child.id !== method?.id) walkRuby(child, facts, scope);
+      return;
+    }
+    case "super":
+      if (scope.method) facts.calls.push({ callee: scope.method, receiver: "super", line: line(node), column: column(node) });
+      return;
+    case "identifier":
+      // `total` with no arguments and no receiver: a call, unless the method made it a variable.
+      if (!scope.variables.has(node.text)) facts.calls.push({ callee: node.text, receiver: null, line: line(node), column: column(node) });
+      return;
+    case "constant":
+      rubyUse(node, facts, scope);
+      return;
+    case "scope_resolution":
+      if (rubyConstant(node)) rubyUse(node, facts, scope);
+      else walkChildren(node);
+      return;
+    case "exception_variable":
+      rubyHide(namedChildren(node).map((child) => child.text), node, facts, scope);
+      return;
+    case "alias":
+    case "undef":
+    case "hash_key_symbol":
+      return;
+    case "for":
+    case "in_clause":
+    case "test_pattern":
+    case "match_pattern": {
+      // What the pattern names is bound by it, not read.
+      const pattern = node.childForFieldName("pattern");
+      if (pattern) {
+        const names = new Set<string>();
+        if (node.type === "for") rubyAssigned(pattern, names);
+        else rubyPatternNames(pattern, names);
+        rubyHide(names, pattern, facts, scope);
+      }
+      for (const child of namedChildren(node)) if (child.id !== pattern?.id) walkRuby(child, facts, scope);
+      return;
+    }
+    case "string":
+      sniffSql(node, facts);
+      break;
+    case "heredoc_body": {
+      // What is interpolated stays in as a placeholder, so that `ALTER TABLE #{name} ADD ...` does not read as a table called `add`.
+      const text = namedChildren(node)
+        .map((child) => (child.type === "heredoc_content" ? child.text : child.type === "interpolation" ? "#{}" : ""))
+        .join("");
+      if (text.length >= 12 && looksLikeSql(text)) facts.tables.push(...tablesInSql(text, line(node)));
+      break;
+    }
+    default:
+      break;
+  }
+  walkChildren(node);
+}
+
+export function extractRuby(root: Node, facts: FileFacts): void {
+  const variables = new Set<string>();
+  const typed = new Set<string>();
+  rubyVariables(root, variables, typed);
+  walkRuby(root, facts, { nesting: [], owner: null, inDef: false, inBlock: false, method: null, variables, typed, attrs: new Set(), scopeEnd: endLine(root), bodyEnd: endLine(root), fields: new Set(), seen: new Set() });
+}

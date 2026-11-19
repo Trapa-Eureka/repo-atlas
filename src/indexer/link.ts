@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import type { FileFacts, ImportFact, LocalFact, SymbolFact } from "../extract/index.js";
+import { rubyUnderscore, type FileFacts, type ImportFact, type LocalFact, type SymbolFact } from "../extract/index.js";
 import { envId, fileId, moduleId, symbolId, tableId, type EdgeKind, type GraphEdge, type GraphNode } from "../graph/types.js";
 
 /** One `paths` entry of a tsconfig, or a workspace package, both reduced to "prefix → folders to try". */
@@ -35,6 +35,9 @@ const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs",
 const COMPILED_TO_SOURCE: Record<string, string[]> = { ".js": [".ts", ".tsx"], ".jsx": [".tsx"], ".mjs": [".mts"], ".cjs": [".cts"] };
 const MAX_REEXPORT_HOPS = 4;
 const MAX_INHERITANCE_DEPTH = 5;
+const MAX_RUBY_OPENERS = 3;
+// A Rails model includes dozens of modules before its parent is asked. Each is visited once per lookup, so this only bounds the cost.
+const MAX_RUBY_ANCESTORS = 200;
 
 interface Declared {
   facts: FileFacts;
@@ -82,6 +85,18 @@ function scriptCandidates(base: string): string[] {
   return candidates;
 }
 
+/** How many leading folders two paths share: the larger, the nearer. */
+function sharedSegments(a: string, b: string): number {
+  const left = a.split("/");
+  const right = b.split("/");
+  let count = 0;
+  while (count < left.length && count < right.length && left[count] === right[count]) count++;
+  return count;
+}
+
+/** Folders that are on the load path only for the tests inside them. */
+const RUBY_TEST_ROOTS = new Set(["test", "spec"]);
+
 const folderOf = (path: string): string => (posix.dirname(path) === "." ? "" : posix.dirname(path));
 
 /** A Go import outside the repository: the standard library by its path, a hosted module by host/owner/name. */
@@ -116,6 +131,15 @@ class Linker {
   /** Java: fully qualified name → where the type is declared. A name can be declared in several source roots. */
   private readonly javaTypes = new Map<string, Declared[]>();
   private readonly javaPackages = new Set<string>();
+  /** Ruby: full name → every place that opens the class or module. */
+  private readonly rubyTypes = new Map<string, Declared[]>();
+  /** Ruby: full name of a constant that is not a class → the files that assign it. */
+  private readonly rubyConstants = new Map<string, FileFacts[]>();
+  /** Ruby: file name without `.rb` → the files of that name, to find what a `require` names. */
+  private readonly rubyByName = new Map<string, string[]>();
+  /** Ruby: file → the files it requires, where its top-level methods may come from. */
+  private readonly rubyRequired = new Map<string, string[]>();
+  private readonly definedTables = new Set<string>();
   private readonly rustRoots = new Map<string, { dir: string; file: string }>();
   private readonly rustItems = new Map<string, { facts: FileFacts; name: string } | null>();
   private readonly aliases: PathAlias[];
@@ -138,6 +162,17 @@ class Linker {
           this.javaTypes.set(prefix + symbol.name, declared);
           declared.push({ facts, symbol });
         }
+      }
+      for (const table of facts.tables) if (table.op === "define") this.definedTables.add(table.name);
+      if (facts.language === "ruby") {
+        const add = <T>(map: Map<string, T[]>, key: string, value: T) => {
+          const list = map.get(key);
+          if (list) list.push(value);
+          else map.set(key, [value]);
+        };
+        for (const symbol of facts.symbols) if (symbol.kind === "class") add(this.rubyTypes, symbol.name, { facts, symbol });
+        for (const constant of facts.exports) add(this.rubyConstants, constant.exported, facts);
+        if (facts.path.endsWith(".rb")) add(this.rubyByName, posix.basename(facts.path, ".rb"), facts.path);
       }
       if (facts.language === "go") {
         const folder = folderOf(facts.path);
@@ -183,7 +218,7 @@ class Linker {
     for (const symbol of facts.symbols) {
       const id = this.node({ id: symbolId(facts.path, symbol.name), kind: "symbol", name: symbol.name, file: facts.path, line: symbol.line, detail: symbol.kind });
       this.edge(file, id, "defines", symbol.line);
-      for (const key of new Set([symbol.name, symbol.name.split(".").pop() ?? symbol.name])) {
+      for (const key of new Set([symbol.name, symbol.name.split(/\.|::/).pop() ?? symbol.name])) {
         const list = this.symbolsByShortName.get(key);
         if (list) list.push(id);
         else this.symbolsByShortName.set(key, [id]);
@@ -362,13 +397,7 @@ class Linker {
   private javaDeclared(name: string, from: string): Declared | null {
     const declared = this.javaTypes.get(name);
     if (!declared || declared.length < 2) return declared?.[0] ?? null;
-    const shared = (path: string): number => {
-      const a = path.split("/");
-      const b = from.split("/");
-      let count = 0;
-      while (count < a.length && count < b.length && a[count] === b[count]) count++;
-      return count;
-    };
+    const shared = (path: string) => sharedSegments(path, from);
     return declared.reduce((best, candidate) => (shared(candidate.facts.path) > shared(best.facts.path) ? candidate : best));
   }
 
@@ -485,6 +514,186 @@ class Linker {
       const declared = this.javaType(facts, use.name, this.javaOwner(facts, use.line)?.symbol.name ?? null);
       if (declared && declared.facts.path !== facts.path) this.edge(from, fileId(declared.facts.path), "imports", use.line);
     }
+  }
+
+  // ---------- Ruby ----------
+
+  /** The namespaces around a line of a Ruby file, innermost first. */
+  private rubyNesting(facts: FileFacts, line: number, outside = false): string[] {
+    let best: NonNullable<FileFacts["namespaces"]>[number] | null = null;
+    for (const space of facts.namespaces ?? []) {
+      if (line < space.line || line > space.endLine) continue;
+      if (!best || space.endLine - space.line <= best.endLine - best.line) best = space;
+    }
+    // The parent of a class is written on its first line, but outside it.
+    return (outside ? best?.names.slice(1) : best?.names) ?? [];
+  }
+
+  /** The full names a constant written at `line` can stand for, in the order Ruby tries them: each namespace around it, then the top. */
+  private rubyNames(facts: FileFacts, written: string, line: number, outside = false): string[] {
+    if (written.startsWith("::")) return [written.slice(2)];
+    return [...this.rubyNesting(facts, line, outside).map((space) => `${space}::${written}`), written];
+  }
+
+  private rubyType(facts: FileFacts, written: string, line: number, outside = false): { name: string; declared: Declared[] } | null {
+    // A class cannot be its own parent: `class Admin::Users < Users` means the one further out.
+    const itself = outside ? this.rubyNesting(facts, line)[0] : undefined;
+    for (const name of this.rubyNames(facts, written, line, outside)) {
+      const declared = name === itself ? undefined : this.rubyTypes.get(name);
+      if (declared) return { name, declared };
+    }
+    return null;
+  }
+
+  /**
+   * Of the files that open a class, the ones a user of its name depends on: the file named after it
+   * (`Shop::Order` in `shop/order.rb`), nearest to `from` when several are. A class no file is named
+   * after is one opened to add to it (a test helper adding to `Minitest::Test`): then every file
+   * that does, up to a few.
+   */
+  private rubyHomes(type: { name: string; declared: Declared[] }, from: string): Declared[] {
+    const conventional = `${type.name.split("::").map(rubyUnderscore).join("/")}.rb`;
+    const named = type.declared.filter((declared) => declared.facts.path === conventional || declared.facts.path.endsWith(`/${conventional}`));
+    if (named.length === 0 && type.declared.length <= MAX_RUBY_OPENERS) return type.declared;
+    const among = named.length > 0 ? named : type.declared;
+    return [among.reduce((best, candidate) => (sharedSegments(candidate.facts.path, from) > sharedSegments(best.facts.path, from) ? candidate : best))];
+  }
+
+  /** A method of a Ruby class or module: written in any file that opens it, or in what it inherits, includes or extends. */
+  private rubyMethod(type: { name: string; declared: Declared[] } | null, method: string, seen = new Set<string>()): string | null {
+    if (!type || seen.has(type.name) || seen.size > MAX_RUBY_ANCESTORS) return null;
+    seen.add(type.name);
+    const own = `${type.name}.${method}`;
+    for (const declared of type.declared) if (this.symbols.get(declared.facts.path)?.has(own)) return symbolId(declared.facts.path, own);
+    return this.rubyInherited(type, method, seen);
+  }
+
+  /** What a class or module gets methods and constants from, in the order Ruby asks: the modules it includes, last first, then its parent. */
+  private rubyParents(type: { name: string; declared: Declared[] }): { name: string; declared: Declared[] }[] {
+    const parents: { name: string; declared: Declared[] }[] = [];
+    for (const { facts, symbol } of type.declared) {
+      for (const mixin of [...(symbol.embeds ?? [])].reverse()) parents.push(...[this.rubyType(facts, mixin, symbol.line)].filter((found) => found !== null));
+    }
+    for (const { facts, symbol } of type.declared) {
+      const parent = symbol.extends ? this.rubyType(facts, symbol.extends, symbol.line, true) : null;
+      if (parent) parents.push(parent);
+    }
+    return parents.filter((parent) => parent.name !== type.name);
+  }
+
+  /** A method written outside any class: in the file itself, or in a file it requires. */
+  private rubyFunction(facts: FileFacts, name: string): string | null {
+    for (const path of [facts.path, ...(this.rubyRequired.get(facts.path) ?? [])]) {
+      if (this.symbols.get(path)?.get(name)?.kind === "function") return symbolId(path, name);
+    }
+    return null;
+  }
+
+  private rubyCall(facts: FileFacts, call: FileFacts["calls"][number], caller: SymbolFact | null): string | null {
+    const ownerName = caller?.kind === "method" ? caller.name.slice(0, caller.name.lastIndexOf(".")) : caller?.kind === "class" ? caller.name : null;
+    const declared = ownerName ? this.rubyTypes.get(ownerName) : undefined;
+    const owner = ownerName && declared ? { name: ownerName, declared } : null;
+    const typeOf = (written: string) => this.rubyType(facts, written, call.line);
+    if (call.receiver === null) {
+      if (this.local(facts, call.callee, call.line, call.column)) return null;
+      return this.rubyMethod(owner, call.callee) ?? this.rubyFunction(facts, call.callee);
+    }
+    if (call.receiver === "self") return this.rubyMethod(owner, call.callee);
+    // `super`: the same method, as the parents have it.
+    if (call.receiver === "super") return owner ? this.rubyInherited(owner, call.callee, new Set([owner.name])) : null;
+    if (call.receiver.endsWith(".new")) return this.rubyMethod(typeOf(call.receiver.slice(0, -4)), call.callee);
+    if (/^(?:::)?[A-Z]/.test(call.receiver)) {
+      const type = typeOf(call.receiver);
+      if (!type) return null;
+      const found = this.rubyMethod(type, call.callee);
+      if (found || call.callee !== "new") return found;
+      // `Order.new` with no `self.new` of its own makes an instance: a use of the class.
+      const [home] = this.rubyHomes(type, facts.path);
+      return home ? symbolId(home.facts.path, type.name) : null;
+    }
+    const local = this.local(facts, call.receiver, call.line, call.column);
+    return local?.kind === "instance" && local.type ? this.rubyMethod(typeOf(local.type), call.callee) : null;
+  }
+
+  /** A method as the parents of a class have it, not the class itself. */
+  private rubyInherited(type: { name: string; declared: Declared[] }, method: string, seen: Set<string>): string | null {
+    for (const parent of this.rubyParents(type)) {
+      const found = this.rubyMethod(parent, method, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /**
+   * The file a `require` names, by the folders Ruby programs conventionally start with on their
+   * load path: a `lib/` folder anywhere (the nearest one to the requiring file), the repository
+   * root, and the `test/` or `spec/` folder the requiring file is itself in.
+   */
+  private rubyRequire(from: string, specifier: string): string | null {
+    const wanted = `${specifier.replace(/\.rb$/, "")}.rb`;
+    let best: string | null = null;
+    for (const path of this.rubyByName.get(posix.basename(wanted, ".rb")) ?? []) {
+      if (path !== wanted && !path.endsWith(`/${wanted}`)) continue;
+      const root = path.slice(0, Math.max(0, path.length - wanted.length - 1));
+      const kind = posix.basename(root);
+      if (root !== "" && kind !== "lib" && !(RUBY_TEST_ROOTS.has(kind) && from.startsWith(`${root}/`))) continue;
+      if (best === null || sharedSegments(path, from) > sharedSegments(best, from)) best = path;
+    }
+    return best;
+  }
+
+  /**
+   * A Ruby file depends on the files it requires, and on the file of every class, module and
+   * constant it names: most Ruby code is loaded by name (Rails autoloading, one `require` at the
+   * top of a gem), so the names are what say where it reaches.
+   */
+  private addRubyImports(facts: FileFacts): void {
+    const from = fileId(facts.path);
+    const required: string[] = [];
+    this.rubyRequired.set(facts.path, required);
+    for (const fact of facts.imports) {
+      const relative = fact.specifier.startsWith(".");
+      const base = relative ? inside(posix.join(posix.dirname(facts.path), fact.specifier)) : null;
+      const file = relative ? (base ? this.firstIndexed([`${base.replace(/\.rb$/, "")}.rb`]) : null) : this.rubyRequire(facts.path, fact.specifier);
+      if (file) {
+        required.push(file);
+        this.edge(from, fileId(file), "imports", fact.line);
+      } else if (relative) {
+        this.unresolved.push({ file: facts.path, specifier: fact.specifier, line: fact.line });
+      } else {
+        const name = fact.specifier.split("/")[0] ?? fact.specifier;
+        this.edge(from, this.node({ id: moduleId(name), kind: "module", name, file: null, line: null, detail: "ruby" }), "imports", fact.line);
+      }
+    }
+    const nearest = (files: FileFacts[]) => files.reduce<FileFacts | null>((best, candidate) => (!best || sharedSegments(candidate.path, facts.path) > sharedSegments(best.path, facts.path) ? candidate : best), null);
+    for (const use of facts.uses ?? []) {
+      const type = this.rubyType(facts, use.name, use.line, use.outside);
+      let found = type ? this.rubyHomes(type, facts.path).map((home) => home.facts) : [];
+      if (found.length === 0) {
+        const holder = nearest(this.rubyNames(facts, use.name, use.line, use.outside).map((name) => this.rubyConstants.get(name)).find((files) => files !== undefined) ?? []);
+        if (holder) found = [holder];
+      }
+      if (found.length === 0 && use.name.includes("::")) {
+        // `Order::LIMIT`, where `Order` gets `LIMIT` from its parent or from a module it includes:
+        // the file names `Order`, and reaches the file that holds the constant through it.
+        const cut = use.name.lastIndexOf("::");
+        const owner = this.rubyType(facts, use.name.slice(0, cut), use.line, use.outside);
+        const holder = owner ? nearest(this.rubyInheritedConstant(owner, use.name.slice(cut + 2), new Set([owner.name]))) : null;
+        if (owner && holder) found = [...this.rubyHomes(owner, facts.path).map((home) => home.facts), holder];
+      }
+      for (const file of found) this.edge(from, fileId(file.path), "imports", use.line);
+    }
+  }
+
+  /** The files that assign a constant in what a class inherits, includes or extends. */
+  private rubyInheritedConstant(type: { name: string; declared: Declared[] }, constant: string, seen: Set<string>): FileFacts[] {
+    for (const parent of this.rubyParents(type)) {
+      if (seen.has(parent.name) || seen.size > MAX_RUBY_ANCESTORS) continue;
+      seen.add(parent.name);
+      const holders = this.rubyConstants.get(`${parent.name}::${constant}`) ?? this.rubyInheritedConstant(parent, constant, seen);
+      if (holders.length > 0) return holders;
+    }
+    return [];
   }
 
   // ---------- Rust ----------
@@ -719,6 +928,7 @@ class Linker {
 
   private addImports(facts: FileFacts): void {
     if (facts.language === "rust") return this.addRustImports(facts);
+    if (facts.language === "ruby") return this.addRubyImports(facts);
     if (facts.language === "go") return this.addGoImports(facts);
     if (facts.language === "java") return this.addJavaImports(facts);
     const python = facts.language === "python";
@@ -879,6 +1089,8 @@ class Linker {
         target = this.javaCall(facts, call);
       } else if (facts.language === "rust") {
         target = this.rustCall(facts, call, caller);
+      } else if (facts.language === "ruby") {
+        target = this.rubyCall(facts, call, caller);
       } else if (call.receiver === null) {
         // `const { parse } = db; parse()` is a call of `db.parse`.
         // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.
@@ -909,7 +1121,9 @@ class Linker {
   private addTablesAndEnvs(facts: FileFacts): void {
     const from = fileId(facts.path);
     for (const table of facts.tables) {
-      const id = this.node({ id: tableId(table.name), kind: "table", name: table.name, file: null, line: null, detail: null });
+      const name = !table.inferred || this.definedTables.has(table.name) ? table.name : table.otherwise && this.definedTables.has(table.otherwise) ? table.otherwise : null;
+      if (name === null) continue;
+      const id = this.node({ id: tableId(name), kind: "table", name, file: null, line: null, detail: null });
       const kind = table.op === "define" ? "defines_table" : table.op === "write" ? "writes_table" : "reads_table";
       this.edge(from, id, kind, table.line);
       const node = this.nodes.get(id);

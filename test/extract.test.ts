@@ -11,6 +11,7 @@ describe("languageOf", () => {
     expect(languageOf("a/b.py")).toBe("python");
     expect(languageOf(".env.example")).toBe("env");
     expect(languageOf("README.md")).toBe("markdown");
+    expect(languageOf("lib/tasks/import.rake")).toBe("ruby");
   });
 
   it("never indexes real env files, type declarations or minified bundles", () => {
@@ -202,6 +203,65 @@ def _private():
     ]);
     expect(facts.calls.map((call) => `${call.receiver ?? ""}.${call.callee}`)).toEqual(expect.arrayContaining(["self.save", "tools.flush", "cursor.execute", "os.getenv"]));
     expect(facts.tables.map((table) => `${table.op}:${table.name}`).sort()).toEqual(["define:accounts", "write:accounts"]);
+    expect(facts.envs.map((env) => env.name).sort()).toEqual(["REGION", "STAGE"]);
+  });
+
+  it("extracts Ruby symbols, requires, calls, constants, tables and env keys", async () => {
+    const facts = await extractFile(
+      "lib/shop/order.rb",
+      `require "json"
+require_relative "record"
+require "./relative_to_cwd"
+
+module Shop
+  class Order < Record
+    include Priced
+    LIMIT = 5
+
+    def initialize(id)
+      @repo = Repo.new
+    end
+
+    def self.find(id)
+      new(id)
+    end
+
+    def total
+      rows = @repo.load("SELECT total FROM orders WHERE id = 1")
+      rows.sum + tax
+    end
+
+    # ENV["IN_A_COMMENT"]
+    def region
+      ENV.fetch("REGION", ENV["STAGE"])
+    end
+  end
+end
+
+def helper
+  Shop::Order.find(1)
+end
+`,
+    );
+    expect(facts.symbols.map((symbol) => `${symbol.kind}:${symbol.name}`)).toEqual([
+      "class:Shop::Order",
+      "method:Shop::Order.initialize",
+      "method:Shop::Order.find",
+      "method:Shop::Order.total",
+      "method:Shop::Order.region",
+      "function:helper",
+    ]);
+    expect(facts.symbols[0]).toMatchObject({ extends: "Record", embeds: ["Priced"] });
+    expect(facts.imports.map((fact) => fact.specifier)).toEqual(["json", "./record"]);
+    expect(facts.namespaces).toEqual([
+      { names: ["Shop"], line: 5, endLine: 28 },
+      { names: ["Shop::Order", "Shop"], line: 6, endLine: 27 },
+    ]);
+    expect(facts.exports).toEqual([{ exported: "Shop::Order::LIMIT", local: "LIMIT" }]);
+    expect(facts.uses?.map((use) => use.name)).toEqual(["Record", "Priced", "Repo", "ENV", "Shop::Order"]);
+    expect(facts.locals).toEqual([{ name: "@repo", kind: "instance", type: "Repo", line: 6, endLine: 27 }]);
+    expect(facts.calls.map((call) => `${call.receiver ?? ""}.${call.callee}`)).toEqual([".include", "Repo.new", ".new", "@repo.load", "rows.sum", ".tax", "ENV.fetch", "Shop::Order.find"]);
+    expect(facts.tables.map((table) => `${table.op}:${table.name}`)).toEqual(["read:orders"]);
     expect(facts.envs.map((env) => env.name).sort()).toEqual(["REGION", "STAGE"]);
   });
 });
