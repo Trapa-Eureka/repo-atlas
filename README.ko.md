@@ -67,6 +67,10 @@ flowchart LR
 
 </details>
 
+**브라우저에서 보는 전체 그래프** (`atlas view`). 인덱스 옆에 HTML 파일 하나를 만듭니다. 검색, 노드 주변 보기, 바뀌면 깨지는 것 보기가 들어 있고, 네트워크에서 아무것도 불러오지 않습니다.
+
+<img src="assets/view.png" alt="브라우저: 샘플 저장소의 atlas view 화면. 왼쪽에 검색 목록, 가운데에 users 테이블이 바뀌면 영향받는 파일 9개의 그림, 오른쪽에 같은 목록이 거리별로 묶여 있다" width="820">
+
 **같은 그래프를 코딩 에이전트에게** (Phase 4). Model Context Protocol로 제공합니다.
 
 <img src="assets/mcp.png" alt="터미널: atlas init이 MCP 서버를 등록하고, 서버가 도구 6개를 나열하며, atlas_path 호출이 web/App.tsx에서 users 테이블까지의 연결을 돌려준다" width="820">
@@ -88,6 +92,7 @@ flowchart LR
 | 증분 인덱싱: 바뀐 파일만 다시 파싱하고, 모든 질의가 먼저 인덱스를 갱신 | 완료 |
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, 모두 `--json` 지원 | 완료 |
 | `atlas mermaid`: 파일 단위 전체 그림 또는 노드 하나의 주변 | 완료 |
+| `atlas view`: 그래프를 브라우저에서 탐색하는 HTML 페이지 하나로 저장 (서버 없음) | 완료 |
 | `atlas mcp`: 도구 6개를 가진 MCP 서버(stdio). `atlas init`이 `.mcp.json`에 등록 | 완료 |
 | 로컬 SQLite 인덱스(내장 `node:sqlite`, 컴파일할 것 없음) | 완료 |
 | npm 패키지 배포 (`repo-atlas-cli`) | 완료 |
@@ -166,6 +171,7 @@ alias atlas='node /path/to/repo-atlas/dist/cli/main.js'   # 경로는 맞게 바
 | 두 대상이 어떻게 이어지는지 보기 | `atlas path <from> <to>` |
 | 파일 단위 전체 그림 그리기 | `atlas mermaid [--max n] [-o graph.mmd]` |
 | 노드 하나의 주변 그리기 | `atlas mermaid --focus <target> [--depth n]` |
+| 브라우저에서 그래프 탐색 | `atlas view [--focus <target>] [--open] [-o page.html]` |
 | 그래프 크기, 허브 파일, 해석 못 한 import 보기 | `atlas stats [--unresolved]` |
 | 그래프 전체 내보내기 | `atlas export [-o graph.json]` |
 
@@ -263,6 +269,7 @@ atlas init        # .mcp.json에 "repo-atlas"를 추가하고 다른 서버는 �
 - 인덱스(`.atlas/`)는 내 컴퓨터에 남습니다. 폴더 안에 자체 `.gitignore`가 있어 실수로 커밋되지 않습니다.
 - 인덱스에는 파일 경로, 심볼 이름, 테이블 이름, 환경변수 키 **이름**이 들어갑니다. 파일 내용이나 환경변수 값은 들어가지 않습니다.
 - 실제 env 파일(`.env`, `.env.local` 등)은 열지 않습니다. `.env.example` 같은 템플릿만 읽습니다.
+- `atlas view`가 만드는 페이지에는 인덱스와 같은 경로와 이름이 들어 있습니다. `--out`을 주지 않으면 `.atlas/view.html`에 저장됩니다. 다른 곳에 둔 사본은 인덱스처럼 다루세요.
 - 텔레메트리도, 네트워크 요청도, API 키도 없습니다.
 
 ## 프로젝트 구조
@@ -307,6 +314,7 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
   - [ ] 언어 추가
     - [x] Go
     - [ ] Rust, Java, Ruby
+  - [x] 로컬 HTML 뷰어 (`atlas view`)
   - [ ] IDE 연동
 - [ ] **Phase 6**: 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 (계획중)
 

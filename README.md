@@ -65,6 +65,10 @@ flowchart LR
 
 </details>
 
+**The whole graph in a browser** (`atlas view`). One HTML file, written next to the index, with search, the neighbourhood of any node, and what breaks if it changes. It loads nothing from the network:
+
+<img src="assets/view.png" alt="Browser: the atlas view page for the sample repository. A search list on the left, a drawing in the middle of the nine files that are affected when the users table changes, and the same list grouped by distance on the right" width="820">
+
 **The same graph for a coding agent** (Phase 4), over the Model Context Protocol:
 
 <img src="assets/mcp.png" alt="Terminal: atlas init registers the MCP server, the server lists six tools, and a call to atlas_path returns the chain from web/App.tsx to the users table" width="820">
@@ -86,6 +90,7 @@ flowchart LR
 | Incremental indexing: only changed files are re-parsed; every query refreshes the index first                                                            | Done    |
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, each with `--json`                                                                  | Done    |
 | `atlas mermaid`: file overview or the neighbourhood of one node                                                                                          | Done    |
+| `atlas view`: the graph as one HTML page to explore in a browser, with no server                                                                       | Done    |
 | `atlas mcp`: MCP server (stdio) with six tools; `atlas init` registers it in `.mcp.json`                                                                 | Done    |
 | Local SQLite index (built-in `node:sqlite`, nothing to compile)                                                                                          | Done    |
 | Published npm package (`repo-atlas-cli`)                                                                                                                 | Done    |
@@ -164,6 +169,7 @@ Every command accepts `-C <dir>` (work on another repository), `--json` (machine
 | understand how two things are connected       | `atlas path <from> <to>`                                                     |
 | draw the file-level overview                  | `atlas mermaid [--max n] [-o graph.mmd]`                                     |
 | draw the surroundings of one node             | `atlas mermaid --focus <target> [--depth n]`                                 |
+| explore the graph in a browser                | `atlas view [--focus <target>] [--open] [-o page.html]`                      |
 | see graph size, hub files, unresolved imports | `atlas stats [--unresolved]`                                                 |
 | dump the whole graph                          | `atlas export [-o graph.json]`                                               |
 
@@ -261,6 +267,7 @@ The hooks are a safety net, not a complete defense: they match command text, so 
 - The index (`.atlas/`) stays on your machine. The folder contains its own `.gitignore`, so it is never committed by accident.
 - The index holds file paths, symbol names, table names and env key **names**. It does not hold file contents or env values.
 - Real env files (`.env`, `.env.local`, …) are never opened; only templates such as `.env.example` are read.
+- `atlas view` writes a page that holds the same paths and names as the index. It goes to `.atlas/view.html` unless you pass `--out`; treat a copy you put elsewhere like the index itself.
 - No telemetry, no network requests, no API keys.
 
 ## Project layout
@@ -305,6 +312,7 @@ TypeScript (ESM) on Node.js 22+ · [web-tree-sitter](https://github.com/tree-sit
   - [ ] more languages
     - [x] Go
     - [ ] Rust, Java, Ruby
+  - [x] local HTML viewer (`atlas view`)
   - [ ] IDE integration
 - [ ] **Phase 6**: paid plans: hosted private-repository indexing, shared team graph, CI integration (planned)
 

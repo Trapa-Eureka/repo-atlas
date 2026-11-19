@@ -22,15 +22,20 @@ function chrome() {
   return found;
 }
 
-/** Writes `assets/<name>.png` from `html`, at `width` x `height` CSS pixels times `scale`. */
-export function render(name, html, { width, height, scale = 1 }) {
+/**
+ * Writes `assets/<name>.png` from `html`, at `width` x `height` CSS pixels times `scale`.
+ * For a page that draws itself with a script: `wait` (milliseconds) lets the script finish before
+ * the capture, and `hash` is added to the page address, where such a page may read its state.
+ */
+export function render(name, html, { width, height, scale = 1, wait = 0, hash = "" }) {
   const work = mkdtempSync(join(tmpdir(), "atlas-shot-"));
   try {
     const page = join(work, `${name}.html`);
     writeFileSync(page, html);
+    const waiting = wait ? [`--virtual-time-budget=${wait}`] : [];
     execFileSync(
       chrome(),
-      ["--headless=new", "--disable-gpu", "--hide-scrollbars", `--force-device-scale-factor=${scale}`, `--window-size=${width},${height}`, `--screenshot=${join(assets, `${name}.png`)}`, pathToFileURL(page).href],
+      ["--headless=new", "--disable-gpu", "--hide-scrollbars", ...waiting, `--force-device-scale-factor=${scale}`, `--window-size=${width},${height}`, `--screenshot=${join(assets, `${name}.png`)}`, pathToFileURL(page).href + hash],
       { stdio: "ignore" },
     );
   } finally {

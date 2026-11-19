@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Command, InvalidArgumentError } from "commander";
@@ -27,6 +28,16 @@ function nodeKind(value: string): NodeKind {
 
 function print(text: string): void {
   process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+/** Hands a file to the operating system's default browser, without waiting for it. */
+function openInBrowser(file: string): void {
+  const [command, ...args] = process.platform === "darwin" ? ["open", file] : process.platform === "win32" ? ["cmd", "/c", "start", "", file] : ["xdg-open", file];
+  try {
+    spawn(command ?? "open", args, { stdio: "ignore", detached: true }).on("error", () => note(`Could not open a browser. Open ${file} yourself.`)).unref();
+  } catch {
+    note(`Could not open a browser. Open ${file} yourself.`);
+  }
 }
 
 function note(text: string): void {
@@ -139,6 +150,23 @@ export function buildProgram(): Command {
         } else {
           output(result, () => result.text);
         }
+      }),
+    );
+
+  program
+    .command("view")
+    .description("write the graph as one HTML page to explore in a browser (no server, nothing leaves this machine)")
+    .option("-f, --focus <target>", "open the page on this node")
+    .option("-o, --out <file>", "where to write the page (default: .atlas/view.html)")
+    .option("--open", "open the page in the default browser")
+    .action((options: { focus?: string; out?: string; open?: boolean }) =>
+      withAtlas((atlas) => {
+        const result = atlas.view(options.focus ? { focus: options.focus } : {});
+        const file = options.out ? resolve(options.out) : atlas.viewFile;
+        writeFileSync(file, result.html);
+        if (options.open) openInBrowser(file);
+        output({ file, nodes: result.nodes, edges: result.edges }, () => file);
+        if (!globals().json) note(`Wrote ${result.nodes} nodes and ${result.edges} relations. Open the file in a browser${options.open ? " (opening it now)" : ", or pass --open"}.`);
       }),
     );
 

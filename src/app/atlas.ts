@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Graph } from "../graph/graph.js";
 import type { GraphNode, NodeKind } from "../graph/types.js";
 import { indexRepository, lastSummary, unresolvedImports, type IndexOptions, type IndexSummary } from "../indexer/indexer.js";
@@ -11,6 +11,7 @@ import { mermaid, type MermaidResult } from "../query/mermaid.js";
 import { path, type PathResult } from "../query/path.js";
 import { resolveTarget, search } from "../query/resolve.js";
 import { stats, type StatsResult } from "../query/stats.js";
+import { view, type ViewResult } from "../query/view.js";
 import { DATA_FOLDER, Store } from "../store/store.js";
 
 /** The repository a command applies to: the nearest folder with an index, else the git root, else `start`. */
@@ -102,6 +103,16 @@ export class Atlas {
       ...(options.depth !== undefined ? { depth: options.depth } : {}),
       ...(options.maxNodes !== undefined ? { maxNodes: options.maxNodes } : {}),
     });
+  }
+
+  /** The whole graph as one HTML page to open in a browser. */
+  view(options: { focus?: string } = {}): ViewResult {
+    return view(this.graph, { title: basename(this.root), ...(options.focus ? { focus: this.target(options.focus) } : {}) });
+  }
+
+  /** Where `atlas view` writes its page unless told otherwise: next to the index, which git already ignores. */
+  get viewFile(): string {
+    return join(this.root, DATA_FOLDER, "view.html");
   }
 
   stats(): StatsResult & { unresolvedImports: UnresolvedImport[] } {

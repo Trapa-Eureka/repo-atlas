@@ -102,6 +102,19 @@ describe("Atlas on the sample repository", () => {
     atlas.close();
   });
 
+  it("writes the graph as one self-contained page", async () => {
+    const atlas = await Atlas.open(root);
+    const page = atlas.view({ focus: "users" });
+    atlas.close();
+    expect(page).toMatchObject({ nodes: 50, edges: 88 });
+    expect(page.html).not.toMatch(/(?:src|href)=["']?https?:/);
+    const embedded = /window\.ATLAS = (.*);<\/script>/.exec(page.html)?.[1] ?? "";
+    const data = JSON.parse(embedded) as { nodes: unknown[][]; edges: number[][]; edgeKinds: string[]; focus: string };
+    expect(data.focus).toBe("table:users");
+    expect(data.nodes).toHaveLength(50);
+    expect(data.edges.every(([src, dst, kind]) => data.nodes[src ?? -1] !== undefined && data.nodes[dst ?? -1] !== undefined && data.edgeKinds[kind ?? -1] !== undefined)).toBe(true);
+  });
+
   it("re-parses only what changed, and notices deletions", async () => {
     const first = await Atlas.open(root);
     first.close();
@@ -149,6 +162,19 @@ describe("CLI", () => {
 
     const json = await atlas("--json", "search", "order", "--kind", "table");
     expect(JSON.parse(json.out)).toEqual([{ id: "table:orders", kind: "table", name: "orders", file: "src/db/schema.sql", line: 7, detail: null }]);
+  });
+
+  it("writes the viewer next to the index and prints only its path", async () => {
+    const result = await atlas("view", "--focus", "findUser");
+    expect(result.code).toBe(0);
+    expect(result.out).toBe(`${join(root, ".atlas", "view.html")}\n`);
+    expect(result.err).toContain("50 nodes and 88 relations");
+    expect(readFileSync(join(root, ".atlas", "view.html"), "utf8")).toContain('"focus":"sym:src/users/repo.ts#findUser"');
+
+    const elsewhere = join(root, "graph.html");
+    const json = await atlas("--json", "view", "--out", elsewhere);
+    expect(JSON.parse(json.out)).toEqual({ file: elsewhere, nodes: 50, edges: 88 });
+    expect(readFileSync(elsewhere, "utf8").startsWith("<!doctype html>")).toBe(true);
   });
 
   it("exits 2 and lists candidates when the target is not unique", async () => {

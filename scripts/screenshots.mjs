@@ -1,7 +1,7 @@
 // Re-captures the README screenshots in assets/: runs the built CLI on fixtures/shop and renders each
 // capture as a terminal window. Run with `pnpm screenshots` (builds first).
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { render, repo } from "./chrome.mjs";
 
@@ -105,6 +105,13 @@ svg{display:block}</style><div class="win"><div class="bar"><i style="background
 <svg width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" fill="none" font-family="ui-monospace,'SF Mono',Menlo,monospace"><defs><marker id="tip" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#4a5869"/></marker></defs>${drawn.join("")}</svg>
 <div class="legend">${legend}</div></div>`;
   render("mermaid", html, { width: 900, height: 56 + 38 + 16 + 42 + height + 36, scale: 2 });
+}
+
+// Phase 5: the page `atlas view` writes, opened on what breaks when the users table changes.
+{
+  const page = join(shop, ".atlas", "view.html");
+  atlas("view");
+  render("view", readFileSync(page, "utf8"), { width: 1280, height: 720, scale: 2, wait: 3000, hash: `#${encodeURIComponent("table:users")};impact;1` });
 }
 
 // Phase 0: the lint hook rejecting a layer violation
