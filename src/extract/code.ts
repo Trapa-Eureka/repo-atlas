@@ -559,7 +559,7 @@ function goReturns(declaration: Node): string | null {
 
 /** A call written simply enough to say what is called: `f()`, `x.f()`, `x.y.f()`, and any of those on the result of another such call. */
 function goCallRef(node: Node | null | undefined, depth = 0): CallRef | null {
-  if (node?.type !== "call_expression" || depth > 4) return null;
+  if (node?.type !== "call_expression" || depth > 8) return null;
   const callee = node.childForFieldName("function");
   const at = { line: line(node), column: column(node) };
   if (callee?.type === "identifier") return { callee: callee.text, receiver: null, ...at };
@@ -933,6 +933,20 @@ interface RustScope {
   bounds: Map<string, string>;
   /** How many `mod name { ... }` blocks of this file are around: inside one, `super` is the file itself. */
   inline: number;
+  /** The type parameters of the `impl` or trait around: names that are not types of the crate. */
+  generics: Set<string>;
+  /** Inside a trait: `Self` is whatever type implements it, which the trait does not say. */
+  inTrait: boolean;
+}
+
+/** The names a `<..>` list declares: `Key` and `V` in `<'a, Key: Hash, V>`. */
+function rustGenerics(node: Node, into: Set<string>): Set<string> {
+  const list = node.childForFieldName("type_parameters");
+  for (const parameter of list ? namedChildren(list) : []) {
+    const name = parameter.type === "type_identifier" ? parameter.text : parameter.childForFieldName("name")?.text;
+    if (name) into.add(name);
+  }
+  return into;
 }
 
 /** A path as seen from the file, when it is written inside inline modules: each `super` that only leaves an inline module becomes `self`. */
@@ -1028,6 +1042,73 @@ function rustLetConstructor(node: Node): string | null {
   return name ? (tried ? "?" : "") + name : null;
 }
 
+/**
+ * What a Rust function returns, as written (`T`, `a::T`), or `?T` when wrapped in `Result` or `Option`;
+ * `?` for anything that does not name one type of the crate: a type parameter, an associated type
+ * (`Self::Item`), `Self` in a trait, a tuple, a `Vec`.
+ */
+function rustReturns(node: Node, scope: RustScope): string | null {
+  const returned = node.childForFieldName("return_type");
+  if (!returned) return null;
+  // `Result<Self>`, `io::Result<Self>`, `Option<Self>` and aliases such as `CompileResult<'a, Self>` wrap what `?` takes out.
+  const wrapped = returned.type === "generic_type" && /(?:Result|Option)$/.test(returned.childForFieldName("type")?.text ?? "");
+  const argumentList = wrapped ? returned.childForFieldName("type_arguments") : null;
+  const inner = argumentList ? namedChildren(argumentList).find((argument) => argument.type !== "lifetime") : returned;
+  const written = rustTypeName(inner, new Map())?.replace(/\s+/g, "");
+  const generics = rustGenerics(node, new Set(scope.generics));
+  const plain = !written || generics.has(written) || /^Self::/.test(written) ? null : written === "Self" ? (scope.inTrait ? null : scope.owner) : written;
+  return (wrapped ? "?" : "") + (plain ?? "?");
+}
+
+/** The call under `?`, `.await`, `.unwrap()` and `.expect(..)`, and whether one of them took the value out of a `Result` or an `Option`. */
+function rustUnwrapped(value: Node | null | undefined): { call: Node | null; tried: boolean } {
+  let tried = false;
+  for (let at = value; at; ) {
+    if (at.type === "try_expression") {
+      tried = true;
+      at = namedChildren(at)[0];
+    } else if (at.type === "await_expression" || at.type === "parenthesized_expression") {
+      at = namedChildren(at)[0];
+    } else if (at.type === "call_expression") {
+      const callee = at.childForFieldName("function");
+      const unwraps = callee?.type === "field_expression" && /^(?:unwrap|expect)$/.test(callee.childForFieldName("field")?.text ?? "");
+      if (!unwraps) return { call: at, tried };
+      tried = true;
+      at = callee?.childForFieldName("value") ?? undefined;
+    } else {
+      return { call: null, tried };
+    }
+  }
+  return { call: null, tried };
+}
+
+/** A call written simply enough to say what is called: `f()`, `a::b::f()`, `x.f()`, `self.y.f()`, and a method on the result of another such call. */
+function rustCallRef(node: Node | null | undefined, inline: number, depth = 0): CallRef | null {
+  if (node?.type !== "call_expression" || depth > 8) return null;
+  let callee = node.childForFieldName("function");
+  if (callee?.type === "generic_function") callee = callee.childForFieldName("function");
+  const at = { line: line(node), column: column(node) };
+  if (callee?.type === "identifier") return { callee: callee.text, receiver: null, ...at };
+  if (callee?.type === "scoped_identifier") {
+    const name = callee.childForFieldName("name")?.text;
+    const path = callee.childForFieldName("path")?.text.replace(/\s+/g, "");
+    // A path call keeps its path as the receiver, marked by the trailing `::` so that it is not taken for a variable.
+    return name && path ? { callee: name, receiver: `${rustFromFile(path.split("::"), inline).join("::")}::`, ...at } : null;
+  }
+  if (callee?.type !== "field_expression") return null;
+  const value = callee.childForFieldName("value");
+  const field = callee.childForFieldName("field")?.text;
+  if (!field || !value) return null;
+  if (value.type === "identifier" || value.type === "self") return { callee: field, receiver: value.text, ...at };
+  if (value.type === "field_expression" && value.childForFieldName("value")?.type === "self") {
+    const owner = value.childForFieldName("field")?.text;
+    return owner ? { callee: field, receiver: `self.${owner}`, ...at } : null;
+  }
+  const { call, tried } = rustUnwrapped(value);
+  const via = rustCallRef(call, inline, depth + 1);
+  return via ? { callee: field, receiver: "()", ...at, via: { ...via, ...(tried ? { tried } : {}) } } : null;
+}
+
 function walkRust(node: Node, facts: FileFacts, scope: RustScope, impls: [string, string][]): void {
   const here = { line: line(node), endLine: endLine(node), column: column(node) };
   let inner = scope;
@@ -1075,14 +1156,14 @@ function walkRust(node: Node, facts: FileFacts, scope: RustScope, impls: [string
         if (fieldName && fieldType) (symbol.fields ??= {})[fieldName] = fieldType;
       }
       addSymbol(facts, symbol);
-      if (node.type === "trait_item") inner = { ...scope, owner: name };
+      if (node.type === "trait_item") inner = { ...scope, owner: name, generics: rustGenerics(node, new Set()), inTrait: true };
       break;
     }
     case "impl_item": {
       const type = rustTypeName(node.childForFieldName("type"), new Map());
       const trait = rustTypeName(node.childForFieldName("trait"), new Map());
       if (type && trait) impls.push([type.split("::").pop() ?? type, trait]);
-      inner = { ...scope, owner: type ? (type.split("::").pop() ?? type) : null };
+      inner = { ...scope, owner: type ? (type.split("::").pop() ?? type) : null, generics: rustGenerics(node, new Set()), inTrait: false };
       break;
     }
     case "function_item":
@@ -1091,16 +1172,12 @@ function walkRust(node: Node, facts: FileFacts, scope: RustScope, impls: [string
       const name = node.childForFieldName("name")?.text;
       if (name && scope.owner && !scope.inFunction) {
         const method: SymbolFact = { name: `${scope.owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false };
-        const returned = node.childForFieldName("return_type");
-        // `Result<Self>`, `io::Result<Self>`, `Option<Self>` and aliases such as `CompileResult<'a, Self>` wrap what `?` takes out.
-        const wrapped = returned?.type === "generic_type" && /(?:Result|Option)$/.test(returned.childForFieldName("type")?.text ?? "");
-        const argumentList = wrapped ? returned.childForFieldName("type_arguments") : null;
-        const inner = argumentList ? namedChildren(argumentList).find((argument) => argument.type !== "lifetime") : returned;
-        const plain = rustTypeName(inner, new Map())?.split("::").pop();
-        if (returned) method.returns = (wrapped ? "?" : "") + (plain === "Self" ? scope.owner : (plain ?? "?"));
+        const returns = rustReturns(node, scope);
+        if (returns) method.returns = returns;
         addSymbol(facts, method);
       } else if (name && !scope.inFunction) {
-        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: namedChildren(node).some((child) => child.type === "visibility_modifier"), isDefault: false });
+        const returns = rustReturns(node, { ...scope, owner: null });
+        addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: namedChildren(node).some((child) => child.type === "visibility_modifier"), isDefault: false, ...(returns ? { returns } : {}) });
       } else if (name) {
         facts.locals.push({ name, kind: "other", line: line(node), endLine: scope.scopeEnd, column: column(node) });
       }
@@ -1128,10 +1205,17 @@ function walkRust(node: Node, facts: FileFacts, scope: RustScope, impls: [string
     }
     case "let_declaration": {
       const pattern = node.childForFieldName("pattern");
-      const range = { ...here, endLine: scope.scopeEnd };
+      // The name means this from the end of the statement on: `let x = x.next()` still reads the old `x`.
+      const range = { line: endLine(node), endLine: Math.max(endLine(node), scope.scopeEnd), column: node.endPosition.column };
       const type = pattern?.type === "identifier" ? rustLetType(node, scope.bounds) : null;
       const via = type ? rustLetConstructor(node) : null;
-      if (pattern?.type === "identifier" && type) facts.locals.push({ name: pattern.text, kind: "instance", type, ...(via ? { via } : {}), ...range });
+      // `let x = open(..)?`, `let x = a.b()`: no type is written, but the function called may say what it returns.
+      // The same holds for `let x = T::name()` when `name` turns out not to return a `T`.
+      const made = pattern?.type === "identifier" && (!type || via) && !node.childForFieldName("type") ? rustUnwrapped(node.childForFieldName("value")) : null;
+      const call = made ? rustCallRef(made.call, scope.inline) : null;
+      const from = call ? { from: { ...call, ...(made?.tried ? { tried: true } : {}) } } : {};
+      if (pattern?.type === "identifier" && type) facts.locals.push({ name: pattern.text, kind: "instance", type, ...(via ? { via } : {}), ...from, ...range });
+      else if (pattern?.type === "identifier" && call) facts.locals.push({ name: pattern.text, kind: "instance", ...from, ...range });
       else rustOthers(pattern, range, facts);
       break;
     }
@@ -1144,25 +1228,8 @@ function walkRust(node: Node, facts: FileFacts, scope: RustScope, impls: [string
       rustOthers(node.childForFieldName("pattern"), { ...here, endLine: endLine(node.parent ?? node) }, facts);
       break;
     case "call_expression": {
-      let callee = node.childForFieldName("function");
-      if (callee?.type === "generic_function") callee = callee.childForFieldName("function");
-      const at = { line: line(node), column: column(node) };
-      if (callee?.type === "identifier") facts.calls.push({ callee: callee.text, receiver: null, ...at });
-      else if (callee?.type === "scoped_identifier") {
-        const name = callee.childForFieldName("name")?.text;
-        const path = callee.childForFieldName("path")?.text.replace(/\s+/g, "");
-        // A path call keeps its path as the receiver, marked by the trailing `::` so that it is not taken for a variable.
-        if (name && path) facts.calls.push({ callee: name, receiver: `${rustFromFile(path.split("::"), scope.inline).join("::")}::`, ...at });
-      } else if (callee?.type === "field_expression") {
-        const value = callee.childForFieldName("value");
-        const field = callee.childForFieldName("field")?.text;
-        if (!field) break;
-        if (value?.type === "identifier" || value?.type === "self") facts.calls.push({ callee: field, receiver: value.text, ...at });
-        else if (value?.type === "field_expression" && value.childForFieldName("value")?.type === "self") {
-          const owner = value.childForFieldName("field")?.text;
-          if (owner) facts.calls.push({ callee: field, receiver: `self.${owner}`, ...at });
-        }
-      }
+      const call = rustCallRef(node, scope.inline);
+      if (call) facts.calls.push(call);
       break;
     }
     case "token_tree": {
@@ -1197,7 +1264,7 @@ function walkRust(node: Node, facts: FileFacts, scope: RustScope, impls: [string
 
 export function extractRust(root: Node, facts: FileFacts): void {
   const impls: [string, string][] = [];
-  walkRust(root, facts, { owner: null, inFunction: false, scopeEnd: endLine(root), bounds: new Map(), inline: 0 }, impls);
+  walkRust(root, facts, { owner: null, inFunction: false, scopeEnd: endLine(root), bounds: new Map(), inline: 0, generics: new Set(), inTrait: false }, impls);
   // `impl Trait for Type` gives the type the trait's methods, default ones included.
   for (const [type, trait] of impls) {
     const symbol = facts.symbols.find((candidate) => candidate.name === type && candidate.kind === "class");

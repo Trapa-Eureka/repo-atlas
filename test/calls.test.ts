@@ -554,7 +554,7 @@ describe("Rust", () => {
     expect(await edgesOf("imports", both)).toEqual(["src/lib.rs -> src/shared.rs", "src/main.rs -> src/mailer.rs", "src/tests/foo.rs -> src/shared.rs", "src/tests/mod.rs -> src/tests/foo.rs"]);
   });
 
-  it("does not take a method call in a macro, a constructor of another type or a private item for a call it can follow", async () => {
+  it("does not take a method call in a macro or a private item for a call it can follow, and takes a constructor for what it returns", async () => {
     expect(
       await edgesOf("calls", {
         "src/lib.rs":
@@ -562,7 +562,8 @@ describe("Rust", () => {
         "src/a.rs": "fn hidden() {}\n",
         "src/b.rs": "pub fn hidden() {}\n",
       }),
-    ).toEqual(["src/lib.rs#run -> src/b.rs#hidden", "src/lib.rs#run -> src/lib.rs#Bb.new", "src/lib.rs#run -> src/lib.rs#Bb.open", "src/lib.rs#run -> src/lib.rs#total", "src/lib.rs#tried -> src/lib.rs#Bb.go", "src/lib.rs#tried -> src/lib.rs#Bb.open"]);
+    // `Bb::new()` returns an `Aa`: the value is followed as what the function says it returns, not as a `Bb`.
+    ).toEqual(["src/lib.rs#run -> src/b.rs#hidden", "src/lib.rs#run -> src/lib.rs#Aa.go", "src/lib.rs#run -> src/lib.rs#Bb.new", "src/lib.rs#run -> src/lib.rs#Bb.open", "src/lib.rs#run -> src/lib.rs#total", "src/lib.rs#tried -> src/lib.rs#Bb.go", "src/lib.rs#tried -> src/lib.rs#Bb.open"]);
   });
 
   it("reports a path of the crate that leads nowhere, but not one to a constant, a macro or an inline module", async () => {
@@ -596,6 +597,43 @@ describe("Rust", () => {
         "src/b.rs": "pub use crate::a::*;\n\npub fn two() {\n    one();\n    nowhere();\n}\n",
       }),
     ).toEqual(["src/a.rs#one -> src/b.rs#two", "src/b.rs#two -> src/a.rs#one"]);
+  });
+  it("follows a method on what a call returns: builder chains, and a variable made by a call", async () => {
+    const lib =
+      "pub struct Test;\n\npub struct Output;\n\npub struct Other;\n\nimpl Test {\n    pub fn new() -> Self {\n        Test\n    }\n\n    pub fn open() -> Result<Test, String> {\n        Ok(Test)\n    }\n\n    pub fn arg(self, a: &str) -> Self {\n        self\n    }\n\n    pub fn env(&mut self) -> &mut Test {\n        self\n    }\n\n    pub fn run(self) -> Output {\n        Output\n    }\n\n    pub fn try_run(self) -> Option<Output> {\n        None\n    }\n\n    pub fn raw(self) -> Vec<Output> {\n        vec![]\n    }\n}\n\nimpl Output {\n    pub fn code(&self) -> i32 {\n        0\n    }\n\n    pub fn text(&self) -> i32 {\n        0\n    }\n}\n\nimpl Other {\n    pub fn code(&self) -> i32 {\n        1\n    }\n}\n\npub fn make() -> Test {\n    Test\n}\n";
+    const from = async (body: string) =>
+      (await edgesOf("calls", { "src/lib.rs": lib, "src/main.rs": `mod lib;\n\nuse lib::{make, Test};\n\nfn main() {\n${body}}\n` })).filter((edge) => edge.startsWith("src/main.rs")).map((edge) => edge.replace("src/main.rs#main -> src/lib.rs#", ""));
+
+    // A chain: each method is looked up on what the one before it returns, through `&mut` and `Self`.
+    expect(await from('    Test::new().arg("a").env().run().code();\n')).toEqual(["Output.code", "Test.arg", "Test.env", "Test.new", "Test.run"]);
+    // A variable made by a function, a method, and a call that was awaited and tried.
+    expect(await from("    let t = make();\n    let out = t.run();\n    out.text();\n")).toEqual(["Output.text", "Test.run", "make"]);
+    expect(await from("    let t = Test::open().await?;\n    t.run();\n")).toEqual(["Test.open", "Test.run"]);
+    // `Result` and `Option` give their value only where it is taken out, and a plain value has nothing to take out.
+    expect(await from("    Test::open().run();\n    Test::new().try_run().code();\n    make().unwrap().run();\n")).toEqual(["Test.new", "Test.open", "Test.try_run", "make"]);
+    expect(await from('    Test::open().unwrap().run();\n    Test::new().try_run().expect("x").code();\n    let o = Test::new().try_run()?;\n    o.text();\n')).toEqual(["Output.code", "Output.text", "Test.new", "Test.open", "Test.run", "Test.try_run"]);
+    // Nothing when what is returned is not one type, or when the name is declared again.
+    expect(await from("    Test::new().raw().code();\n    let t = make();\n    let t = unknown();\n    t.run();\n")).toEqual(["Test.new", "Test.raw", "make"]);
+  });
+  it("does not take a type parameter, an associated type or a trait's Self for a type of the crate", async () => {
+    const lib =
+      "pub struct Key;\n\npub struct Item;\n\npub struct Test;\n\npub struct Map<K>(K);\n\npub trait Shape {\n    fn area(&self) {}\n\n    fn twice(self) -> Self {\n        self\n    }\n}\n\npub trait Runner {\n    fn go(&self);\n}\n\nimpl Key {\n    pub fn hit(&self) {}\n}\n\nimpl Item {\n    pub fn hit(&self) {}\n}\n\nimpl<Key> Map<Key> {\n    pub fn first(self) -> Key {\n        self.0\n    }\n}\n\nimpl Test {\n    pub fn new() -> Self {\n        Test\n    }\n\n    pub fn area(&self) {}\n\n    pub fn generic<Key>(&self) -> Key {\n        todo!()\n    }\n\n    pub fn boxed(&self) -> Box<dyn Runner> {\n        todo!()\n    }\n}\n\nimpl Shape for Test {}\n\nimpl Iterator for Test {\n    type Item = Key;\n\n    fn next(&mut self) -> Option<Self::Item> {\n        None\n    }\n}\n\npub fn get<Key>() -> Key {\n    todo!()\n}\n\npub fn map() -> Map<u8> {\n    todo!()\n}\n";
+    const from = async (body: string) =>
+      (await edgesOf("calls", { "src/lib.rs": lib, "src/main.rs": `mod lib;\n\nuse lib::*;\n\nfn main() {\n${body}}\n` })).filter((edge) => edge.startsWith("src/main.rs")).map((edge) => edge.replace("src/main.rs#main -> src/lib.rs#", ""));
+    expect(await from("    get::<u8>().hit();\n    map().first().hit();\n    Test::new().generic::<u8>().hit();\n")).toEqual(["Map.first", "Test.generic", "Test.new", "get", "map"]);
+    expect(await from("    Test::new().next().unwrap().hit();\n    Test::new().twice().area();\n")).toEqual(["Shape.twice", "Test.new", "Test.next"]);
+    // A trait object is followed to the trait's method.
+    expect(await from("    Test::new().boxed().go();\n")).toEqual(["Runner.go", "Test.boxed", "Test.new"]);
+  });
+
+  it("resolves a returned type where the function is declared, and a name declared again from its old value", async () => {
+    expect(
+      await edgesOf("calls", {
+        "src/main.rs": "mod a;\nmod b;\n\nfn main() {\n    b::load().hit();\n    let c = b::load();\n    let c = c.next();\n    c.hit();\n}\n",
+        "src/a.rs": "pub struct Config;\n\nimpl Config {\n    pub fn hit(&self) {}\n\n    pub fn next(self) -> Config {\n        self\n    }\n}\n",
+        "src/b.rs": "pub struct Config;\n\nimpl Config {\n    pub fn hit(&self) {}\n}\n\npub fn load() -> crate::a::Config {\n    crate::a::Config\n}\n",
+      }),
+    ).toEqual(["src/main.rs#main -> src/a.rs#Config.hit", "src/main.rs#main -> src/a.rs#Config.next", "src/main.rs#main -> src/b.rs#load"]);
   });
 });
 

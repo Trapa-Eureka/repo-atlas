@@ -13,7 +13,7 @@ export interface SymbolFact {
   /** For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. For a Rust type: the traits implemented for it in its own file. For a Ruby class or module: what it includes, extends or prepends. */
   embeds?: string[];
   /**
-   * For a Rust method: the type it returns, `?T` when wrapped in `Result` or `Option`. Says whether `let x = T::new()` makes `x` a `T`.
+   * For a Rust function or method: the type it returns, `?T` when wrapped in `Result` or `Option`. Says whether `let x = T::new()` makes `x` a `T`.
    * For a Go function or method: the first type it returns, as written in its file (`Client`, `db.Repo`). Says what `x := New()` makes `x`.
    */
   returns?: string;
@@ -51,7 +51,7 @@ export interface LocalFact {
   object?: string;
   property?: string;
   type?: string;
-  /** Go: the call whose result the name holds (`x := NewClient()`), when no type is written. The type is what that function returns, which another file may say. */
+  /** Go and Rust: the call whose result the name holds (`x := NewClient()`, `let x = open()?`), when no type is written. The type is what that function returns, which another file may say. */
   from?: CallRef;
   /** Rust: the constructor the type was read from (`new` in `let x = T::new()`, `?new` in `let x = T::new()?`), to be checked against what it returns. */
   via?: string;
@@ -87,8 +87,10 @@ export interface CallRef {
   receiver: string | null;
   line: number;
   column?: number;
-  /** Go: the call this one is made on the result of, when `receiver` is `()`: `a.Open().Read()`. */
+  /** Go and Rust: the call this one is made on the result of, when `receiver` is `()`: `a.Open().Read()`. */
   via?: CallRef;
+  /** Rust: the result was taken out of a `Result` or an `Option` before use (`?`, `.unwrap()`, `.expect(..)`). */
+  tried?: boolean;
 }
 
 export interface CallFact {
@@ -101,7 +103,7 @@ export interface CallFact {
   line: number;
   /** Where on the line the call starts, to tell `run(x, (run) => 1)` apart from a call inside the inner function. */
   column?: number;
-  /** Go: the call this one is made on the result of, when `receiver` is `()`: `a.Open().Read()`. */
+  /** Go and Rust: the call this one is made on the result of, when `receiver` is `()`: `a.Open().Read()`. */
   via?: CallRef;
 }
 

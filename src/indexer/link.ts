@@ -35,6 +35,8 @@ const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs",
 const COMPILED_TO_SOURCE: Record<string, string[]> = { ".js": [".ts", ".tsx"], ".jsx": [".tsx"], ".mjs": [".mts"], ".cjs": [".cts"] };
 const MAX_REEXPORT_HOPS = 4;
 const MAX_INHERITANCE_DEPTH = 5;
+// How far a call on the result of a call is followed: builder chains run long.
+const MAX_CALL_DEPTH = 12;
 const MAX_RUBY_OPENERS = 3;
 // A Rails model includes dozens of modules before its parent is asked. Each is visited once per lookup, so this only bounds the cost.
 const MAX_RUBY_ANCESTORS = 200;
@@ -374,7 +376,7 @@ class Linker {
 
   /** What a Go call returns, when the function it calls says so: the first result type, in the terms of the file that declares the function. */
   private goReturned(facts: FileFacts, call: CallRef, depth: number): GoType | null {
-    const id = depth < MAX_INHERITANCE_DEPTH ? this.goCall(facts, call, depth + 1) : null;
+    const id = depth < MAX_CALL_DEPTH ? this.goCall(facts, call, depth + 1) : null;
     const path = id ? id.slice(4, id.indexOf("#")) : null;
     const declaring = path ? this.byPath.get(path) : undefined;
     const returns = id && path ? this.symbols.get(path)?.get(id.slice(id.indexOf("#") + 1))?.returns : undefined;
@@ -888,10 +890,26 @@ class Linker {
     const constructor = this.symbols.get(type.facts.path)?.get(`${type.name}.${local.via.replace(/^\?/, "")}`) ?? this.symbols.get(facts.path)?.get(`${type.name}.${local.via.replace(/^\?/, "")}`);
     // A constructor we cannot see (a derived `default`, an `impl` elsewhere) is trusted only by its conventional name.
     if (!constructor?.returns) return /^\??(?:new|default)$/.test(local.via);
-    return constructor.returns === (tried ? `?${type.name}` : type.name);
+    // What is returned is written as in the constructor's file (`Self`, `a::T`): the last name is the type's.
+    return constructor.returns.startsWith("?") === tried && constructor.returns.replace(/^\?/, "").split("::").pop() === type.name;
   }
 
-  private rustCall(facts: FileFacts, call: FileFacts["calls"][number], caller: SymbolFact | null): string | null {
+  /**
+   * What a Rust call returns, when the function it calls says so, in the terms of the file that
+   * declares the function. A function that returns `Result<T>` or `Option<T>` gives a `T` only
+   * where the caller took it out (`?`, `.unwrap()`), and one that returns `T` only where it did not.
+   */
+  private rustReturned(facts: FileFacts, call: CallRef, depth: number): { facts: FileFacts; name: string } | null {
+    const id = depth < MAX_CALL_DEPTH ? this.rustCall(facts, call, this.enclosing(facts, call.line), depth + 1) : null;
+    const path = id ? id.slice(4, id.indexOf("#")) : null;
+    const declaring = path ? this.byPath.get(path) : undefined;
+    const returns = id && path ? this.symbols.get(path)?.get(id.slice(id.indexOf("#") + 1))?.returns : undefined;
+    if (!declaring || !returns || returns.startsWith("?") !== (call.tried === true)) return null;
+    const name = returns.replace(/^\?/, "");
+    return name === "?" ? null : this.rustType(declaring, name);
+  }
+
+  private rustCall(facts: FileFacts, call: CallRef, caller: SymbolFact | null, depth = 0): string | null {
     const implType = caller?.name.includes(".") ? (caller.name.split(".")[0] ?? null) : null;
     const typeOf = (written: string) => (written === "Self" && implType ? (this.rustType(facts, implType) ?? { facts, name: implType }) : this.rustType(facts, written));
     const functionId = (item: { facts: FileFacts; name: string } | null) => {
@@ -902,6 +920,8 @@ class Linker {
     if (call.receiver === null) {
       return this.local(facts, call.callee, call.line, call.column) ? null : functionId(this.rustItem(facts, call.callee, true));
     }
+    // `Test::new().arg(..)`: a method of whatever the inner call returns.
+    if (call.receiver === "()") return call.via ? this.rustMethod(this.rustReturned(facts, call.via, depth), call.callee, facts) : null;
     if (call.receiver.endsWith("::")) {
       const path = call.receiver.slice(0, -2).split("::").filter(Boolean);
       if (path[0] === "Self" && implType) path[0] = implType;
@@ -913,9 +933,11 @@ class Linker {
     }
     const [receiver, field] = call.receiver.split(".");
     const local = receiver ? this.local(facts, receiver, call.line, call.column) : null;
-    if (local?.kind !== "instance" || !local.type) return null;
-    const type = typeOf(local.type);
-    if (!this.rustConstructed(facts, local, type)) return null;
+    if (local?.kind !== "instance" || (!local.type && !local.from)) return null;
+    // A type read off `let x = T::name()` holds only if `name` returns a `T`. Otherwise, and when no type
+    // was written at all, it is whatever the call says it returns.
+    const written = local.type ? typeOf(local.type) : null;
+    const type = written && this.rustConstructed(facts, local, written) ? written : local.from ? this.rustReturned(facts, local.from, depth) : null;
     if (field === undefined) return this.rustMethod(type, call.callee, facts);
     const fieldType = type ? this.symbols.get(type.facts.path)?.get(type.name)?.fields?.[field] : undefined;
     return type && fieldType ? this.rustMethod(this.rustType(type.facts, fieldType), call.callee, facts) : null;
