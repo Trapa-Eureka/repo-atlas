@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { languageOf } from "../extract/index.js";
 
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -12,7 +12,7 @@ const IGNORED_WITHOUT_GIT = new Set([
   ...ALWAYS_IGNORED, "dist", "build", "out", "coverage", "vendor", "target",
   ".next", ".nuxt", ".turbo", ".cache", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
 ]);
-const PROJECT_CONFIGS = new Set(["tsconfig.json", "jsconfig.json", "package.json"]);
+const PROJECT_CONFIGS = new Set(["tsconfig.json", "jsconfig.json", "package.json", "go.mod"]);
 
 export interface WalkedFile {
   path: string;
@@ -22,7 +22,7 @@ export interface WalkedFile {
 
 export interface WalkResult {
   files: WalkedFile[];
-  /** tsconfig.json / jsconfig.json / package.json paths, used only to resolve import aliases. */
+  /** tsconfig.json / jsconfig.json / package.json / go.mod paths, used only to resolve import aliases. */
   configs: string[];
   skippedLarge: number;
 }
@@ -70,7 +70,11 @@ function diskFiles(root: string, folder = ""): string[] {
 /** Lists the files to index. Inside a git repository this honours `.gitignore`; elsewhere it skips well-known output folders. */
 export function walk(root: string): WalkResult {
   const result: WalkResult = { files: [], configs: [], skippedLarge: 0 };
-  for (const path of (gitFiles(root) ?? diskFiles(root)).sort()) {
+  const paths = (gitFiles(root) ?? diskFiles(root)).sort();
+  // `vendor/modules.txt` is what `go mod vendor` writes: that folder holds copies of dependencies, tracked or not.
+  const vendored = paths.filter((path) => basename(path) === "modules.txt" && basename(dirname(path)) === "vendor").map((path) => `${dirname(path)}/`);
+  for (const path of paths) {
+    if (vendored.some((folder) => path.startsWith(folder))) continue;
     if (PROJECT_CONFIGS.has(basename(path))) {
       result.configs.push(path);
       continue;

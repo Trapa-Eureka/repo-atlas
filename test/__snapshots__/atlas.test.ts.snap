@@ -2,40 +2,47 @@
 
 exports[`Atlas on the sample repository > draws a stable Mermaid overview 1`] = `
 "flowchart LR
-  n0["jobs/__init__.py"]
-  n1["jobs/utils.py"]
-  n2["scripts/report.py"]
-  n3["src/api/handler.ts"]
-  n4["src/db/client.ts"]
-  n5["src/db/schema.sql"]
-  n6["src/index.ts"]
-  n7["src/orders/service.ts"]
-  n8["src/users/repo.ts"]
-  n9["web/App.tsx"]
-  n10["web/OrderList.tsx"]
-  n11[("orders")]
-  n12[("users")]
-  n2 -->|imports| n0
-  n2 -->|imports| n1
-  n2 -->|reads_table| n11
-  n2 -->|reads_table| n12
-  n3 -->|imports| n6
-  n3 -->|imports| n7
-  n3 -->|imports| n8
-  n5 -->|defines_table| n11
-  n5 -->|defines_table| n12
-  n5 -->|reads_table| n12
-  n6 -->|imports| n7
-  n6 -->|imports| n8
-  n7 -->|imports| n4
-  n7 -->|imports| n8
-  n7 -->|reads_table| n11
-  n7 -->|writes_table| n11
-  n7 -->|reads_table| n12
-  n8 -->|imports| n4
-  n8 -->|reads_table| n12
-  n8 -->|writes_table| n12
+  n0["billing/cmd/main.go"]
+  n1["billing/invoice/service.go"]
+  n2["billing/invoice/store.go"]
+  n3["jobs/__init__.py"]
+  n4["jobs/utils.py"]
+  n5["scripts/report.py"]
+  n6["src/api/handler.ts"]
+  n7["src/db/client.ts"]
+  n8["src/db/schema.sql"]
+  n9["src/index.ts"]
+  n10["src/orders/service.ts"]
+  n11["src/users/repo.ts"]
+  n12["web/App.tsx"]
+  n13["web/OrderList.tsx"]
+  n14[("invoices")]
+  n15[("orders")]
+  n16[("users")]
+  n0 -->|imports| n1
+  n0 -->|imports| n2
+  n2 -->|reads_table| n14
+  n5 -->|imports| n3
+  n5 -->|imports| n4
+  n5 -->|reads_table| n15
+  n5 -->|reads_table| n16
+  n6 -->|imports| n9
+  n6 -->|imports| n10
+  n6 -->|imports| n11
+  n8 -->|defines_table| n15
+  n8 -->|defines_table| n16
+  n8 -->|reads_table| n16
   n9 -->|imports| n10
-  n10 -->|imports| n8
+  n9 -->|imports| n11
+  n10 -->|imports| n7
+  n10 -->|imports| n11
+  n10 -->|reads_table| n15
+  n10 -->|writes_table| n15
+  n10 -->|reads_table| n16
+  n11 -->|imports| n7
+  n11 -->|reads_table| n16
+  n11 -->|writes_table| n16
+  n12 -->|imports| n13
+  n13 -->|imports| n11
 "
 `;

@@ -27,8 +27,8 @@ const relation = (result: ReturnType<Atlas["context"]>, name: string) => names(r
 describe("Atlas on the sample repository", () => {
   it("indexes every supported file and nothing else", async () => {
     const atlas = await Atlas.open(root);
-    expect(atlas.summary).toMatchObject({ files: 13, parsed: 13, unchanged: 0, failed: [], unresolvedImports: 0, relinked: true });
-    expect(atlas.stats().nodes).toEqual({ file: 13, symbol: 15, table: 2, env: 3, module: 2 });
+    expect(atlas.summary).toMatchObject({ files: 16, parsed: 16, unchanged: 0, failed: [], unresolvedImports: 0, relinked: true });
+    expect(atlas.stats().nodes).toEqual({ file: 16, symbol: 24, table: 3, env: 4, module: 3 });
     atlas.close();
   });
 
@@ -58,8 +58,8 @@ describe("Atlas on the sample repository", () => {
 
   it("does not mistake prose or SQL functions for tables", async () => {
     const atlas = await Atlas.open(root);
-    expect(names(atlas.search("", { kind: "table" })).sort()).toEqual(["table:orders", "table:users"]);
-    expect(names(atlas.export().nodes.filter((node) => node.kind === "table"))).toEqual(["table:orders", "table:users"]);
+    expect(names(atlas.search("", { kind: "table" })).sort()).toEqual(["table:invoices", "table:orders", "table:users"]);
+    expect(names(atlas.export().nodes.filter((node) => node.kind === "table"))).toEqual(["table:invoices", "table:orders", "table:users"]);
     atlas.close();
   });
 
@@ -107,7 +107,7 @@ describe("Atlas on the sample repository", () => {
     first.close();
 
     const unchanged = await Atlas.open(root);
-    expect(unchanged.summary).toMatchObject({ parsed: 0, unchanged: 13, relinked: false, nodes: 35 });
+    expect(unchanged.summary).toMatchObject({ parsed: 0, unchanged: 16, relinked: false, nodes: 50 });
     unchanged.close();
 
     const file = join(root, "src/users/repo.ts");
@@ -117,7 +117,7 @@ describe("Atlas on the sample repository", () => {
     rmSync(join(root, "web/App.tsx"));
 
     const changed = await Atlas.open(root);
-    expect(changed.summary).toMatchObject({ files: 12, parsed: 1, unchanged: 11, removed: 1, relinked: true });
+    expect(changed.summary).toMatchObject({ files: 15, parsed: 1, unchanged: 14, removed: 1, relinked: true });
     expect(names(changed.search("removeUser"))).toEqual(["sym:src/users/repo.ts#removeUser"]);
     expect(changed.search("App.tsx")).toEqual([]);
     changed.close();

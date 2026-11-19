@@ -1,4 +1,4 @@
-export type Language = "typescript" | "tsx" | "javascript" | "python" | "sql" | "markdown" | "env";
+export type Language = "typescript" | "tsx" | "javascript" | "python" | "go" | "sql" | "markdown" | "env";
 
 export interface SymbolFact {
   /** Qualified inside the file: `name` for top-level, `Class.method` for members. */
@@ -10,9 +10,17 @@ export interface SymbolFact {
   isDefault: boolean;
   /** For a class: the name it extends, as written in this file. */
   extends?: string;
+  /** For a Go struct: the types it embeds, whose methods it gets. */
+  embeds?: string[];
+  /** For a Go struct: field name → the type written for it (`Store`, `db.Repo`). */
+  fields?: Record<string, string>;
 }
 
-/** A name a file exports that is not the name of one of its own symbols: `export { a as b }`, `export default a`, `module.exports = a`. */
+/**
+ * A name a file exports that is not the name of one of its own symbols: `export { a as b }`,
+ * `export default a`, `module.exports = a`. For Go: a package-level constant or variable, which is
+ * not a symbol but still says which file of the package a user of that name depends on.
+ */
 export interface ExportFact {
   /** The name seen from outside: `b`, `default`, or `default.b` for a member of a default-exported object. */
   exported: string;
@@ -56,6 +64,8 @@ export interface ImportFact {
   /** `export * from "x"` or `from x import *`. */
   star: boolean;
   line: number;
+  /** Go: the names of the package this file uses (`pkg.Name`), to tell which of the package's files it depends on. */
+  members?: string[];
 }
 
 export interface CallFact {
@@ -90,6 +100,8 @@ export interface DocRefFact {
 export interface FileFacts {
   path: string;
   language: Language;
+  /** Go: the name in the `package` clause. Files of one folder can belong to two packages (`x` and `x_test`). */
+  package?: string;
   symbols: SymbolFact[];
   imports: ImportFact[];
   calls: CallFact[];

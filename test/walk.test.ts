@@ -36,6 +36,30 @@ describe("walk", () => {
   });
 });
 
+describe("Go modules", () => {
+  it("skips a vendor folder written by `go mod vendor`, and reads the module path", () => {
+    root = mkdtempSync(join(tmpdir(), "atlas-go-"));
+    for (const [path, text] of Object.entries({
+      "svc/go.mod": "module example.com/svc\n\ngo 1.22\n",
+      "svc/main.go": "package main\n",
+      "svc/vendor/modules.txt": "# github.com/x/y v1.0.0\n",
+      "svc/vendor/github.com/x/y/y.go": "package y\n",
+      "tools/vendor/kept.go": "package vendor\n",
+    })) {
+      mkdirSync(join(root, dirname(path)), { recursive: true });
+      writeFileSync(join(root, path), text);
+    }
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "add", "."]);
+    const walked = walk(root);
+    expect(walked.files.map((file) => file.path)).toEqual(["svc/main.go", "tools/vendor/kept.go"]);
+    expect(loadAliases(root, walked.configs).map((alias) => `${alias.prefix} -> ${alias.targets.join(", ")} (${alias.language})`)).toEqual([
+      "example.com/svc -> svc (go)",
+      "example.com/svc/ -> svc/ (go)",
+    ]);
+  });
+});
+
 describe("loadAliases", () => {
   it("maps a link: dependency to the folder it points at, for the package that declares it", () => {
     root = mkdtempSync(join(tmpdir(), "atlas-alias-"));

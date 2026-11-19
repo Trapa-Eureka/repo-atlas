@@ -11,6 +11,8 @@ export interface PathAlias {
   exact: boolean;
   /** Repository-relative path prefixes the rest of the specifier is appended to. */
   targets: string[];
+  /** Set for a Go module path: it names a folder (a package), and only Go files import through it. */
+  language?: "go";
 }
 
 export interface LinkOptions {
@@ -33,6 +35,13 @@ const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs",
 const COMPILED_TO_SOURCE: Record<string, string[]> = { ".js": [".ts", ".tsx"], ".jsx": [".tsx"], ".mjs": [".mts"], ".cjs": [".cts"] };
 const MAX_REEXPORT_HOPS = 4;
 const MAX_INHERITANCE_DEPTH = 5;
+
+/** A Go type by package folder and name. `from` is the file that wrote the name when it is in that package itself. */
+interface GoType {
+  folder: string;
+  name: string;
+  from: FileFacts | null;
+}
 
 interface Binding {
   file: string;
@@ -61,6 +70,14 @@ function scriptCandidates(base: string): string[] {
   return candidates;
 }
 
+const folderOf = (path: string): string => (posix.dirname(path) === "." ? "" : posix.dirname(path));
+
+/** A Go import outside the repository: the standard library by its path, a hosted module by host/owner/name. */
+function goModuleName(specifier: string): string {
+  const parts = specifier.split("/");
+  return (parts[0] ?? "").includes(".") ? parts.slice(0, 3).join("/") : specifier;
+}
+
 function externalPackage(specifier: string, python: boolean): string {
   if (python) return specifier.split(".")[0] ?? specifier;
   const parts = specifier.split("/");
@@ -80,6 +97,10 @@ class Linker {
   private readonly bindingCache = new Map<string, Map<string, Binding>>();
   /** Class symbol id → where it is declared, to follow `extends`. */
   private readonly classes = new Map<string, { facts: FileFacts; symbol: SymbolFact }>();
+  /** Go: folder → its files, non-test files first. A folder is a package. */
+  private readonly goFolders = new Map<string, FileFacts[]>();
+  /** Go: file → the folder each import alias stands for. */
+  private readonly goPackages = new Map<string, Map<string, string>>();
   private readonly aliases: PathAlias[];
 
   private readonly files: FileFacts[];
@@ -91,7 +112,15 @@ class Linker {
       this.byPath.set(facts.path, facts);
       this.symbols.set(facts.path, new Map(facts.symbols.map((symbol) => [symbol.name, symbol])));
       for (const symbol of facts.symbols) if (symbol.kind === "class") this.classes.set(symbolId(facts.path, symbol.name), { facts, symbol });
+      if (facts.language === "go") {
+        const folder = folderOf(facts.path);
+        const files = this.goFolders.get(folder) ?? [];
+        this.goFolders.set(folder, files);
+        files.push(facts);
+      }
     }
+    const isTest = (facts: FileFacts) => (facts.path.endsWith("_test.go") ? 1 : 0);
+    for (const files of this.goFolders.values()) files.sort((a, b) => isTest(a) - isTest(b) || (a.path < b.path ? -1 : 1));
   }
 
   run(): LinkResult {
@@ -147,7 +176,7 @@ class Linker {
       return { file: base === null ? null : this.firstIndexed(scriptCandidates(base)), local: true };
     }
     for (const alias of this.aliases) {
-      if (alias.scope && !from.startsWith(`${alias.scope}/`)) continue;
+      if (alias.language || (alias.scope && !from.startsWith(`${alias.scope}/`))) continue;
       const matches = alias.exact ? specifier === alias.prefix : specifier.startsWith(alias.prefix);
       if (!matches) continue;
       const rest = alias.exact ? "" : specifier.slice(alias.prefix.length);
@@ -185,7 +214,123 @@ class Linker {
     return { file, local: file !== null };
   }
 
+  // ---------- Go ----------
+
+  /** The folder a Go import path names, when a go.mod of this repository covers it. */
+  private resolveGo(specifier: string): { folder: string | null; local: boolean } {
+    for (const alias of this.aliases) {
+      if (alias.language !== "go") continue;
+      if (alias.exact ? specifier !== alias.prefix : !specifier.startsWith(alias.prefix)) continue;
+      const folder = ((alias.targets[0] ?? "") + (alias.exact ? "" : specifier.slice(alias.prefix.length))).replace(/\/$/, "");
+      return { folder: this.goFolders.has(folder) ? folder : null, local: true };
+    }
+    return { folder: null, local: false };
+  }
+
+  /** The files a Go import of `folder` reaches: its non-test files, which all share one package name. */
+  private goPackageFiles(folder: string): FileFacts[] {
+    return (this.goFolders.get(folder) ?? []).filter((file) => !file.path.endsWith("_test.go") && !file.package?.endsWith("_test"));
+  }
+
+  private goDeclares(file: FileFacts, name: string): boolean {
+    return this.symbols.get(file.path)?.has(name) === true || file.exports.some((declared) => declared.exported === name);
+  }
+
+  /**
+   * A Go file depends on the files of a package that declare what it uses. A type it uses also
+   * brings the files that hold its methods. When a used name cannot be placed, or nothing is used
+   * by name (a blank or dot import), it depends on all of the package's files.
+   */
+  private addGoImports(facts: FileFacts): void {
+    const from = fileId(facts.path);
+    const packages = new Map<string, string>();
+    this.goPackages.set(facts.path, packages);
+    for (const fact of facts.imports) {
+      const { folder, local } = this.resolveGo(fact.specifier);
+      if (folder === null) {
+        if (local) this.unresolved.push({ file: facts.path, specifier: fact.specifier, line: fact.line });
+        else {
+          const name = goModuleName(fact.specifier);
+          this.edge(from, this.node({ id: moduleId(name), kind: "module", name, file: null, line: null, detail: "go" }), "imports", fact.line);
+        }
+        continue;
+      }
+      const files = this.goPackageFiles(folder);
+      for (const name of fact.names) packages.set(name.local, folder);
+      // Without an alias the package is used under its own name, which need not be the folder's.
+      const declared = files[0]?.package;
+      if (declared && !packages.has(declared) && fact.names.length > 0) packages.set(declared, folder);
+
+      const members = fact.members ?? [];
+      const placed = members.every((member) => files.some((file) => this.goDeclares(file, member)));
+      const used = files.filter((file) => {
+        const own = this.symbols.get(file.path);
+        return members.some((member) => this.goDeclares(file, member) || [...(own?.keys() ?? [])].some((name) => name.startsWith(`${member}.`)));
+      });
+      for (const file of placed && used.length > 0 ? used : files) this.edge(from, fileId(file.path), "imports", fact.line);
+    }
+  }
+
+  /**
+   * A name of a package: in `from` itself first, then in the other files of the same package.
+   * Seen from another package (`from` is null), only its non-test files count.
+   */
+  private goSymbol(folder: string, name: string, from: FileFacts | null): string | null {
+    if (from && this.symbols.get(from.path)?.has(name)) return symbolId(from.path, name);
+    const files = from ? (this.goFolders.get(folder) ?? []).filter((file) => file.package === from.package) : this.goPackageFiles(folder);
+    for (const file of files) if (this.symbols.get(file.path)?.has(name)) return symbolId(file.path, name);
+    return null;
+  }
+
+  /** Where a type name written in `facts` lives: `T` in its own package, `pkg.T` in an imported one. */
+  private goType(facts: FileFacts, written: string): GoType | null {
+    const [first, second] = written.split(".");
+    if (second === undefined) return first ? { folder: folderOf(facts.path), name: first, from: facts } : null;
+    const folder = first ? this.goPackages.get(facts.path)?.get(first) : undefined;
+    return folder === undefined ? null : { folder, name: second, from: null };
+  }
+
+  private goDeclaration(type: GoType): { facts: FileFacts; symbol: SymbolFact } | null {
+    const id = this.goSymbol(type.folder, type.name, type.from);
+    const declared = id ? this.classes.get(id) : undefined;
+    return declared ?? null;
+  }
+
+  /** A method of a Go type: declared in any file of its package, or promoted from a type it embeds. */
+  private goMethod(type: GoType | null, method: string, depth = 0): string | null {
+    if (!type) return null;
+    const own = this.goSymbol(type.folder, `${type.name}.${method}`, type.from);
+    if (own || depth >= MAX_INHERITANCE_DEPTH) return own;
+    const declared = this.goDeclaration(type);
+    if (!declared) return null;
+    for (const embedded of declared.symbol.embeds ?? []) {
+      const promoted = this.goMethod(this.goType(declared.facts, embedded), method, depth + 1);
+      if (promoted) return promoted;
+    }
+    return null;
+  }
+
+  private goCall(facts: FileFacts, call: FileFacts["calls"][number]): string | null {
+    const [receiver, field] = call.receiver?.split(".") ?? [];
+    // `ID(x)` and `pkg.ID(x)` on a type are conversions, not calls.
+    const callable = (id: string | null) => (id && this.nodes.get(id)?.detail !== "class" ? id : null);
+    if (!receiver) return this.local(facts, call.callee, call.line, call.column) ? null : callable(this.goSymbol(folderOf(facts.path), call.callee, facts));
+    const local = this.local(facts, receiver, call.line, call.column);
+    if (!local) {
+      // `pkg.Func()`: only exported names are visible from another package.
+      const folder = field === undefined ? this.goPackages.get(facts.path)?.get(receiver) : undefined;
+      return folder !== undefined && /^[A-Z]/.test(call.callee) ? callable(this.goSymbol(folder, call.callee, null)) : null;
+    }
+    const type = local.kind === "instance" && local.type ? this.goType(facts, local.type) : null;
+    if (field === undefined) return this.goMethod(type, call.callee);
+    // `s.store.Load()`: the type of the field is written in the struct, in the terms of the file that declares it.
+    const declared = type ? this.goDeclaration(type) : null;
+    const fieldType = declared?.symbol.fields?.[field];
+    return declared && fieldType ? this.goMethod(this.goType(declared.facts, fieldType), call.callee) : null;
+  }
+
   private addImports(facts: FileFacts): void {
+    if (facts.language === "go") return this.addGoImports(facts);
     const python = facts.language === "python";
     if (!python && !isScript(facts)) return;
     const from = fileId(facts.path);
@@ -333,7 +478,9 @@ class Linker {
       let target: string | null = null;
 
       const classId = caller?.name.includes(".") ? symbolId(facts.path, caller.name.split(".")[0] ?? "") : null;
-      if (call.receiver === null) {
+      if (facts.language === "go") {
+        target = this.goCall(facts, call);
+      } else if (call.receiver === null) {
         // `const { parse } = db; parse()` is a call of `db.parse`.
         // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.
         const local = this.local(facts, call.callee, call.line, call.column);

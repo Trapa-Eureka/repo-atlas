@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import { Language, Parser } from "web-tree-sitter";
 
-export type Grammar = "typescript" | "tsx" | "javascript" | "python";
+export type Grammar = "typescript" | "tsx" | "javascript" | "python" | "go";
 
 const require = createRequire(import.meta.url);
 const parsers = new Map<Grammar, Promise<Parser>>();

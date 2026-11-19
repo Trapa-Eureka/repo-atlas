@@ -104,13 +104,31 @@ function packageAliases(folder: string, manifest: Record<string, unknown>): Path
   ];
 }
 
-/** Import aliases declared by the repository: tsconfig `paths` / `baseUrl`, and workspace package names. */
+/** `module example.com/shop` in a go.mod: import paths under that name are folders under the go.mod. */
+function goModuleAliases(folder: string, text: string): PathAlias[] {
+  const name = /^\s*module\s+"?([^\s"]+)"?/m.exec(text)?.[1];
+  if (!name) return [];
+  return [
+    { scope: "", prefix: name, exact: true, targets: [folder], language: "go" },
+    { scope: "", prefix: `${name}/`, exact: false, targets: [folder ? `${folder}/` : ""], language: "go" },
+  ];
+}
+
+/** Import aliases declared by the repository: tsconfig `paths` / `baseUrl`, workspace package names, and Go module paths. */
 export function loadAliases(root: string, configs: string[]): PathAlias[] {
   const aliases: PathAlias[] = [];
   for (const path of configs) {
+    const folder = posix.dirname(path) === "." ? "" : posix.dirname(path);
+    if (basename(path) === "go.mod") {
+      try {
+        aliases.push(...goModuleAliases(folder, readFileSync(join(root, path), "utf8")));
+      } catch {
+        // unreadable go.mod: its imports stay external
+      }
+      continue;
+    }
     const json = readJson(join(root, path));
     if (!json) continue;
-    const folder = posix.dirname(path) === "." ? "" : posix.dirname(path);
     aliases.push(...(basename(path) === "package.json" ? [...packageAliases(folder, json), ...linkedFolders(folder, json)] : tsconfigAliases(folder, json)));
   }
   return aliases;

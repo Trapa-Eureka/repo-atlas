@@ -25,6 +25,8 @@ function pythonPatterns(source: string): RegExp[] {
   return BINDS_ENVIRON.test(source) ? [...patterns, ...pythonEnv(BARE_ENVIRON)] : patterns;
 }
 
+const GO_ENV = [new RegExp(`\\bos\\.(?:Getenv|LookupEnv)\\(\\s*["\`]${ENV_NAME}["\`]`, "g")];
+
 function lineOf(source: string, offset: number): number {
   let line = 1;
   for (let i = source.indexOf("\n"); i !== -1 && i < offset; i = source.indexOf("\n", i + 1)) line++;
@@ -33,7 +35,7 @@ function lineOf(source: string, offset: number): number {
 
 /** Where each env key is first used, as an offset into `source`. */
 export function envMatches(source: string, language: Language): { name: string; offset: number }[] {
-  const patterns = language === "python" ? pythonPatterns(source) : SCRIPT_ENV;
+  const patterns = language === "python" ? pythonPatterns(source) : language === "go" ? GO_ENV : SCRIPT_ENV;
   const found: { name: string; offset: number }[] = [];
   for (const re of patterns) {
     for (const match of source.matchAll(re)) if (match[1]) found.push({ name: match[1], offset: match.index });

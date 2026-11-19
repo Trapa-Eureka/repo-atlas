@@ -26,11 +26,11 @@ Repo Atlas는 이런 관계를 질의할 수 있는 그래프 하나에 모아 �
 
 ### 실제 화면
 
-아래 그림은 모두 실제 출력이며, 이 저장소에 들어 있는 작은 샘플 저장소 `fixtures/shop`(TypeScript, TSX, Python, SQL, Markdown)에서 캡처했습니다. 손댄 곳은 하나입니다. 긴 폴더 경로를 `~/shop`으로 줄였습니다.
+아래 그림은 모두 실제 출력이며, 이 저장소에 들어 있는 작은 샘플 저장소 `fixtures/shop`(TypeScript, TSX, Python, Go, SQL, Markdown)에서 캡처했습니다. 손댄 곳은 하나입니다. 긴 폴더 경로를 `~/shop`으로 줄였습니다.
 
 **저장소 인덱싱** (Phase 1, 2). 두 번째 실행에서는 바뀐 파일이 없어서 아무것도 다시 파싱하지 않습니다.
 
-<img src="assets/index.png" alt="터미널: atlas index가 파일 13개를 노드 35개와 엣지 66개로 파싱하고, 두 번째 실행은 0개를 파싱하며, atlas stats가 노드·엣지·언어·가장 많이 의존되는 파일을 보여 준다" width="720">
+<img src="assets/index.png" alt="터미널: atlas index가 파일 16개를 노드 50개와 엣지 88개로 파싱하고, 두 번째 실행은 0개를 파싱하며, atlas stats가 노드·엣지·언어·가장 많이 의존되는 파일을 보여 준다" width="720">
 
 **파일을 고치기 전 브리핑** (Phase 3). 무엇을 정의하고 쓰는지, 누가 이 파일을 쓰는지, 어떤 테이블을 건드리는지, 어떤 문서가 언급하는지 보여 줍니다.
 
@@ -79,11 +79,11 @@ flowchart LR
 
 | 기능 | 상태 |
 |---|---|
-| `atlas index`: TypeScript, TSX, JavaScript, Python을 tree-sitter로 추출 | 완료 |
+| `atlas index`: TypeScript, TSX, JavaScript, Python, Go를 tree-sitter로 추출 | 완료 |
 | SQL 테이블: `.sql` 파일과 문자열 리터럴 안의 SQL을 정의 / 읽기 / 쓰기로 구분 | 완료 |
-| 환경변수 키: `process.env.X`, `import.meta.env.X`, `os.environ`, `os.getenv`, 그리고 `.env.example`에 선언된 키 | 완료 |
+| 환경변수 키: `process.env.X`, `import.meta.env.X`, `os.environ`, `os.getenv`, `os.Getenv`, 그리고 `.env.example`에 선언된 키 | 완료 |
 | 문서: 파일, 함수, 테이블, 환경변수 키를 가리키는 Markdown 링크와 백틱 이름 | 완료 |
-| import 해석: 상대 경로, `.js`→`.ts`, index 파일, tsconfig `paths` / `baseUrl`, 워크스페이스 패키지 이름, Python 패키지와 상대 import | 완료 |
+| import 해석: 상대 경로, `.js`→`.ts`, index 파일, tsconfig `paths` / `baseUrl`, 워크스페이스 패키지 이름, Python 패키지와 상대 import, Go 모듈 경로(`go.mod`) | 완료 |
 | 호출 해석: named·default·namespace import, 배럴 re-export, `this` / `self`, JSX 컴포넌트 | 완료 |
 | 증분 인덱싱: 바뀐 파일만 다시 파싱하고, 모든 질의가 먼저 인덱스를 갱신 | 완료 |
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, 모두 `--json` 지원 | 완료 |
@@ -91,7 +91,7 @@ flowchart LR
 | `atlas mcp`: 도구 6개를 가진 MCP 서버(stdio). `atlas init`이 `.mcp.json`에 등록 | 완료 |
 | 로컬 SQLite 인덱스(내장 `node:sqlite`, 컴파일할 것 없음) | 완료 |
 | npm 패키지 배포 (`repo-atlas-cli`) | 완료 |
-| 언어 추가(Go, Rust, Java, Ruby: 문법 파일은 의존성에 이미 포함) | 예정 |
+| 언어 추가(Rust, Java, Ruby: 문법 파일은 의존성에 이미 포함) | 예정 |
 | IDE 연동 | 예정 |
 | 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 | 계획중 |
 
@@ -109,6 +109,7 @@ flowchart LR
 |---|---|---|
 | TypeScript / JavaScript | `.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs` | 최상위 함수, 클래스, 메서드. import, re-export, `require`와 `module.exports`, 동적 `import()`. 호출, `new`, JSX 컴포넌트 |
 | Python | `.py` | 함수, 클래스, 메서드. `import` / `from … import`. 호출. `__tablename__` |
+| Go | `.go` | 함수, 메서드, 타입. `go.mod`로 해석하는 import. 호출(타입이 적힌 값과 구조체 필드의 메서드 포함) |
 | SQL | `.sql`, 코드 문자열 안의 SQL | `CREATE` / `ALTER` / `INSERT` / `UPDATE` / `DELETE` / `FROM` / `JOIN` / `REFERENCES`, 그리고 `.from("table")` 쿼리 빌더 |
 | 설정 | `.env.example`, `.env.sample`, `.env.template` | 키 이름만 읽고 값은 읽지 않습니다. 실제 `.env` 파일은 열지 않습니다. |
 | 문서 | `.md` `.mdx` | 상대 링크와 `` `백틱` `` 이름 |
@@ -229,6 +230,7 @@ atlas init        # .mcp.json에 "repo-atlas"를 추가하고 다른 서버는 �
 - **호출은 타입 검사기가 아니라 이름과 import로 해석합니다.** 파일이 스스로 밝힌 것은 따라갑니다. `new`로 만든 변수, 클래스를 타입으로 적은 변수·매개변수·클래스 필드, `this.field.method()`, 상속받은 메서드와 `super`, import한 객체에서 꺼낸 이름(`const { parse } = db`), CommonJS의 `require` / `module.exports`가 여기에 들어갑니다. 타입을 추론해야 알 수 있는 값의 메서드(호출 결과, 타입 없는 매개변수), 함수 안에서 쓴 `require()`나 `import()`, 체이닝 호출(`a.b().c()`), 동적 디스패치는 따라가지 않습니다. 해석할 수 없는 호출은 추측하지 않고 뺍니다. 그래서 그래프는 엣지를 지어내는 대신 놓치는 쪽입니다.
 - **SQL 탐지는 패턴 기반입니다.** SQL 텍스트를 읽습니다. 문자열을 이어 붙여 만든 쿼리나 ORM(Prisma, Drizzle, SQLAlchemy 표현식)이 만든 쿼리는 보지 못합니다. 인스턴스에서 부르는 `.from("name")` 호출은 테이블 읽기로 보는데, 쿼리 빌더가 아닌 라이브러리라면 틀릴 수 있습니다. 파일 어디에서든 CTE로 정의된 이름(`WITH recent AS (...)`)은 그 파일에서 테이블로 치지 않습니다. 코드가 CTE를 한 문자열에서 정의하고 다른 문자열에서 읽는 일이 흔하기 때문인데, 같은 이름의 실제 테이블이 있으면 그 파일에서의 읽기는 빠집니다.
 - tsconfig의 `extends`는 따라가지 않고, `package.json`의 `exports` 맵은 읽지 않습니다. 워크스페이스 패키지는 `src/index`, `index`, 또는 `main` 파일로 해석합니다.
+- **Go에서는 폴더가 패키지입니다.** 저장소 안의 패키지를 import하면, import한 쪽이 실제로 쓰는 것을 선언한 파일들로 엣지가 생깁니다(상수, 함수, 또는 타입과 그 메서드가 들어 있는 파일들. 이름의 위치를 알 수 없으면 패키지의 모든 파일). 메서드는 타입이 적힌 값(매개변수, 리시버, `var x T`, `x := T{}`, 구조체 필드, 임베드된 타입)에서만 따라가고, 호출 결과(`x := NewT()`)나 인터페이스를 거친 호출은 따라가지 않습니다. 타입 변환(`ID(x)`)은 호출로 치지 않습니다. 빌드 태그는 무시하므로 플랫폼별로 같은 이름을 선언한 두 파일을 구분하지 못하고, `go mod vendor`가 만든 `vendor/` 폴더는 건너뜁니다. 공개 Go 저장소 4개(gin, cobra, miniflux, pocketbase: Go 파일 1,037개)에서 확인했습니다. 표본 엣지 86개가 모두 맞았고 해석되지 않은 로컬 import는 없었습니다. Go의 빠진 엣지는 재지 않았습니다.
 - Python 절대 import는 저장소 루트에서 먼저 찾고, 없으면 유일한 경로 접미사로 찾습니다. 모듈 경로가 같은 패키지가 둘이면 해석하지 않습니다.
 - 문서는 상대 링크와 백틱 이름으로만 연결합니다. 백틱 안의 흔한 단어가 마침 그 이름을 가진 유일한 함수라면 연결됩니다. 가장 덜 믿을 만한 엣지 종류입니다(아래 수치 참고).
 - 최상위 함수, 클래스, 그 메서드(클래스 프로퍼티에 넣은 화살표 함수 포함)만 심볼입니다. 중첩 함수는 그것을 감싼 함수의 것으로 치고, 일반 객체의 멤버는 심볼이 아닙니다.
@@ -303,6 +305,8 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
 - [ ] **Phase 5**: 릴리스
   - [x] npm 패키지 ([`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli))
   - [ ] 언어 추가
+    - [x] Go
+    - [ ] Rust, Java, Ruby
   - [ ] IDE 연동
 - [ ] **Phase 6**: 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 (계획중)
 

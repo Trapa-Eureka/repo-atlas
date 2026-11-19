@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { extractFile } from "../src/extract/index.js";
-import { link } from "../src/indexer/link.js";
+import { link, type LinkOptions } from "../src/indexer/link.js";
 
-/** Call edges of a small repository given as `{ path: source }`, from source text all the way through linking. */
+const short = (id: string) => id.replace(/^(?:file|sym):/, "");
+
+/** Edges of one kind in a small repository given as `{ path: source }`, from source text all the way through linking. */
+async function edgesOf(kind: string, files: Record<string, string>, options: LinkOptions = {}): Promise<string[]> {
+  const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+  const edges = link(facts, options).edges.filter((edge) => edge.kind === kind);
+  return edges.map((edge) => `${short(edge.src)} -> ${short(edge.dst)}`).sort();
+}
+
 async function calls(files: Record<string, string>): Promise<string[]> {
   const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
   const edges = link(facts).edges.filter((edge) => edge.kind === "calls");
@@ -182,5 +190,110 @@ describe("env keys in code only", () => {
     expect(script.envs.map((env) => env.name).sort()).toEqual(["IN_TEMPLATE", "QUOTED", "REAL"]);
     const python = await extractFile("app/a.py", 'import os\n\ndef load():\n    """Call os.environ["IN_DOCSTRING"] first."""\n    # os.getenv("IN_COMMENT")\n    return os.environ["REAL"], os.getenv("ALSO_REAL")\n');
     expect(python.envs.map((env) => env.name).sort()).toEqual(["ALSO_REAL", "REAL"]);
+  });
+});
+
+describe("Go", () => {
+  const module: LinkOptions = {
+    aliases: [
+      { scope: "", prefix: "example.com/shop", exact: true, targets: [""], language: "go" },
+      { scope: "", prefix: "example.com/shop/", exact: false, targets: [""], language: "go" },
+    ],
+  };
+  const files = {
+    "cmd/main.go":
+      'package main\n\nimport (\n\t"fmt"\n\t"os"\n\n\tbill "example.com/shop/billing"\n\t"example.com/shop/missing"\n\t"github.com/acme/tool/v2/sub"\n)\n\nfunc main() {\n\tstore := bill.NewStore(os.Getenv("REGION"))\n\tservice := &bill.Service{Store: store}\n\tfmt.Println(service.Total(), bill.hidden(), sub.Run(), missing.X)\n\tvar audited bill.Audited\n\taudited.Load()\n\tother := bill.NewStore("x")\n\tother.Load()\n}\n',
+    "billing/service.go":
+      "package billing\n\ntype Service struct {\n\tStore *Store\n\tnames []string\n}\n\ntype Audited struct {\n\t*Store\n}\n\nfunc (s *Service) Total() int {\n\trows := s.Store.Load()\n\treturn sum(rows) + s.count()\n}\n\nfunc (s Service) count() int {\n\tsum := func(xs []int) int { return 0 }\n\treturn sum(nil)\n}\n",
+    "billing/store.go":
+      'package billing\n\ntype Store struct{}\n\nfunc NewStore(region string) *Store {\n\treturn &Store{}\n}\n\nfunc (st *Store) Load() []int {\n\tquery := `SELECT amount FROM invoices`\n\treturn run(query)\n}\n\nfunc run(q string) []int { return nil }\n\nfunc sum(xs []int) int { return 0 }\n\nfunc hidden() int { return 0 }\n',
+    "billing/store_test.go": 'package billing\n\nimport "testing"\n\nfunc TestLoad(t *testing.T) {\n\ts := NewStore("eu")\n\ts.Load()\n\tvar st Store\n\tst.Load()\n}\n',
+    "billing/unused.go": "package billing\n\nfunc Unused() {}\n",
+  };
+
+  it("resolves a module path to a package folder and depends on the files it uses", async () => {
+    expect(await edgesOf("imports", files, module)).toEqual([
+      "billing/store_test.go -> mod:testing",
+      "cmd/main.go -> billing/service.go",
+      "cmd/main.go -> billing/store.go",
+      "cmd/main.go -> mod:fmt",
+      "cmd/main.go -> mod:github.com/acme/tool",
+      "cmd/main.go -> mod:os",
+    ]);
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    expect(link(facts, module).unresolved).toEqual([{ file: "cmd/main.go", specifier: "example.com/shop/missing", line: 8 }]);
+    expect(link(facts).unresolved).toEqual([]);
+  });
+
+  it("links package functions, methods on typed values and fields, and promoted methods", async () => {
+    expect(await edgesOf("calls", files, module)).toEqual([
+      "billing/service.go#Service.Total -> billing/service.go#Service.count",
+      "billing/service.go#Service.Total -> billing/store.go#Store.Load",
+      "billing/service.go#Service.Total -> billing/store.go#sum",
+      "billing/store.go#Store.Load -> billing/store.go#run",
+      "billing/store_test.go#TestLoad -> billing/store.go#NewStore",
+      "billing/store_test.go#TestLoad -> billing/store.go#Store.Load",
+      "cmd/main.go#main -> billing/service.go#Service.Total",
+      "cmd/main.go#main -> billing/store.go#NewStore",
+      "cmd/main.go#main -> billing/store.go#Store.Load",
+    ]);
+  });
+
+  it("keeps to the calling file and to its own package when a folder declares a name twice", async () => {
+    const script = (name: string) => `//go:build ignore\n\npackage main\n\nfunc helper() {}\n\nfunc main() {\n\thelper()\n}\n// ${name}\n`;
+    expect(await edgesOf("calls", { "scripts/a.go": script("a"), "scripts/b.go": script("b") })).toEqual(["scripts/a.go#main -> scripts/a.go#helper", "scripts/b.go#main -> scripts/b.go#helper"]);
+    expect(
+      await edgesOf("calls", {
+        "billing/store.go": "package billing\n\ntype Store struct{}\n\nfunc (s *Store) Load() {}\n\nfunc run() {}\n",
+        "billing/x_test.go": "package billing_test\n\ntype Store struct{}\n\nfunc (s *Store) Load() {}\n\nfunc run() {}\n\nfunc TestX() {\n\trun()\n\ts := &Store{}\n\ts.Load()\n}\n",
+        "billing/y_test.go": "package billing_test\n\nfunc TestY() {\n\trun()\n\tmissing()\n}\n",
+      }),
+    ).toEqual(["billing/x_test.go#TestX -> billing/x_test.go#Store.Load", "billing/x_test.go#TestX -> billing/x_test.go#run", "billing/y_test.go#TestY -> billing/x_test.go#run"]);
+  });
+
+  it("places a file on the constants, variables and methods of a package it uses, or on all of it", async () => {
+    const billing = {
+      "billing/store.go": "package billing\n\ntype Store struct{}\n\nfunc NewStore() *Store { return nil }\n",
+      "billing/methods.go": "package billing\n\nfunc (s *Store) Load() {}\n",
+      "billing/config.go": 'package billing\n\nconst DefaultRegion = "eu"\n\nvar (\n\tDefault = Store{}\n\tretries int\n)\n',
+      "billing/other.go": "package billing\n\nfunc Other() {}\n",
+    };
+    const main = (body: string) => `package main\n\nimport "example.com/shop/billing"\n\nfunc main() {\n${body}}\n`;
+    expect(await edgesOf("imports", { ...billing, "a/main.go": main("\t_ = billing.DefaultRegion\n") }, module)).toEqual(["a/main.go -> billing/config.go"]);
+    expect(await edgesOf("imports", { ...billing, "a/main.go": main("\tvar s billing.Store\n\ts.Load()\n") }, module)).toEqual(["a/main.go -> billing/methods.go", "a/main.go -> billing/store.go"]);
+    expect(await edgesOf("imports", { ...billing, "a/main.go": main("\tbilling.Other()\n\tbilling.Generated()\n") }, module)).toHaveLength(4);
+    expect(await edgesOf("imports", { ...billing, "a/main.go": 'package main\n\nimport _ "example.com/shop/billing"\n' }, module)).toHaveLength(4);
+  });
+
+  it("does not take a conversion, a shadowed name or a type parameter for a call", async () => {
+    expect(
+      await edgesOf("calls", {
+        "a/a.go":
+          "package a\n\ntype ID string\n\ntype T struct{}\n\nfunc (t T) Load() {}\n\nfunc run() {}\n\nfunc convert(s string) ID {\n\treturn ID(s)\n}\n\nfunc named() (run int) {\n\trun()\n\treturn\n}\n\nfunc loop(fs []func()) {\n\tfor _, run := range fs {\n\t\trun()\n\t}\n\tif run := 1; run > 0 {\n\t}\n\trun()\n}\n\nfunc Generic[T interface{ Load() }](x T) {\n\tx.Load()\n}\n",
+      }),
+    ).toEqual(["a/a.go#loop -> a/a.go#run"]);
+  });
+
+  it("follows generic receivers, every embedded type, and a package named differently from its folder", async () => {
+    expect(
+      await edgesOf(
+        "calls",
+        {
+          "go-utils/stack.go": "package utils\n\ntype Stack[T any] struct{}\n\nfunc (s *Stack[T]) Push(v T) {}\n\ntype Left struct{}\n\ntype Mid struct{}\n\nfunc (m Mid) Met() {}\n\ntype Tree struct {\n\tLeft\n\tMid\n\t*Tree\n}\n\nfunc Help() {}\n",
+          "cmd/main.go": 'package main\n\nimport "example.com/shop/go-utils"\n\nfunc main() {\n\tstack := &utils.Stack[int]{}\n\tstack.Push(1)\n\tvar s utils.Tree\n\ts.Met()\n\ts.Nope()\n\tutils.Help()\n}\n',
+        },
+        module,
+      ),
+    ).toEqual(["cmd/main.go#main -> go-utils/stack.go#Help", "cmd/main.go#main -> go-utils/stack.go#Mid.Met", "cmd/main.go#main -> go-utils/stack.go#Stack.Push"]);
+  });
+
+  it("gives the same graph whatever order the files come in", async () => {
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    expect(link([...facts].reverse(), module)).toEqual(link(facts, module));
+  });
+
+  it("reads tables and env keys", async () => {
+    expect(await edgesOf("reads_table", files, module)).toEqual(["billing/store.go -> table:invoices"]);
+    expect(await edgesOf("uses_env", files, module)).toEqual(["cmd/main.go -> env:REGION"]);
   });
 });

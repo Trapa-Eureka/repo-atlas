@@ -1,6 +1,6 @@
 import { basename, extname } from "node:path";
 import type { Node } from "web-tree-sitter";
-import { extractPython, extractScript } from "./code.js";
+import { extractGo, extractPython, extractScript } from "./code.js";
 import { emptyFacts, type FileFacts, type Language, type TableFact } from "./facts.js";
 import { parserFor, type Grammar } from "./parser.js";
 import { cteNamesIn, tablesInSql } from "./sql.js";
@@ -9,7 +9,7 @@ import { envDeclarations, envUses, markdownRefs } from "./text.js";
 export type { CallFact, DocRefFact, EnvFact, ExportFact, FileFacts, ImportFact, ImportedName, Language, LocalFact, SymbolFact, TableFact } from "./facts.js";
 
 /** Bump when extraction output changes, so existing indexes re-parse every file. */
-export const EXTRACTOR_VERSION = 3;
+export const EXTRACTOR_VERSION = 4;
 
 const BY_EXTENSION: Record<string, Language> = {
   ".ts": "typescript",
@@ -21,6 +21,7 @@ const BY_EXTENSION: Record<string, Language> = {
   ".cjs": "javascript",
   ".jsx": "javascript",
   ".py": "python",
+  ".go": "go",
   ".sql": "sql",
   ".md": "markdown",
   ".mdx": "markdown",
@@ -45,7 +46,7 @@ function dedupeTables(tables: TableFact[]): TableFact[] {
   return [...seen.values()];
 }
 
-const TEXT_NODES = new Set(["comment", "string", "template_string", "string_fragment", "string_content", "regex"]);
+const TEXT_NODES = new Set(["comment", "string", "template_string", "string_fragment", "string_content", "regex", "interpreted_string_literal", "raw_string_literal"]);
 const CODE_INSIDE_TEXT = new Set(["template_substitution", "interpolation"]);
 
 /** Whether the source at `offset` is code, as opposed to the inside of a string or a comment. */
@@ -62,7 +63,8 @@ async function extractCode(source: string, facts: FileFacts, grammar: Grammar): 
   const tree = parser.parse(source);
   if (!tree) return;
   try {
-    if (grammar === "python") extractPython(tree.rootNode, facts);
+    if (grammar === "go") extractGo(tree.rootNode, facts);
+    else if (grammar === "python") extractPython(tree.rootNode, facts);
     else extractScript(tree.rootNode, facts);
     // `process.env.X` in a test title or a comment is a mention, not a use.
     facts.envs = envUses(source, facts.language, (offset) => isCode(tree.rootNode, offset));
@@ -81,6 +83,7 @@ export async function extractFile(path: string, source: string): Promise<FileFac
     case "tsx":
     case "javascript":
     case "python":
+    case "go":
       await extractCode(source, facts, language);
       if (facts.tables.some((table) => table.op === "read")) {
         const ctes = cteNamesIn(source);

@@ -1,5 +1,5 @@
 import type { Node } from "web-tree-sitter";
-import type { FileFacts, ImportedName, SymbolFact } from "./facts.js";
+import type { FileFacts, ImportFact, ImportedName, SymbolFact } from "./facts.js";
 import { looksLikeSql, tablesInSql } from "./sql.js";
 
 const line = (node: Node): number => node.startPosition.row + 1;
@@ -509,4 +509,176 @@ function walkPython(node: Node, facts: FileFacts, scope: PythonScope): void {
 
 export function extractPython(root: Node, facts: FileFacts): void {
   walkPython(root, facts, { topLevel: true, className: null });
+}
+
+// ---------- Go ----------
+
+interface GoScope {
+  /** Import alias → the import it stands for, to note which names of the package are used. */
+  packages: Map<string, ImportFact>;
+  /** Last line of the innermost block or function. */
+  scopeEnd: number;
+}
+
+/** `T` from `T`, `*T`, `T[K]`; `pkg.T` from `*pkg.T`. Slices, maps and function types say nothing about one type. */
+function goTypeName(type: Node | null | undefined): string | null {
+  if (!type) return null;
+  if (type.type === "pointer_type" || type.type === "parenthesized_type") return goTypeName(namedChildren(type)[0]);
+  if (type.type === "generic_type") return goTypeName(type.childForFieldName("type"));
+  // A single capital letter is a type parameter (`T`, `K`), not a type of the package.
+  return (type.type === "type_identifier" && !/^[A-Z]$/.test(type.text)) || type.type === "qualified_type" ? type.text : null;
+}
+
+/** The type a value is built as: `T{...}`, `&T{...}`, `pkg.T{...}`. */
+function goConstructedType(value: Node | undefined): string | null {
+  const literal = value?.type === "unary_expression" ? value.childForFieldName("operand") : value;
+  return literal?.type === "composite_literal" ? goTypeName(literal.childForFieldName("type")) : null;
+}
+
+/** The name a package is used under when the import gives none: the last path segment, minus a version. */
+function goPackageName(path: string): string {
+  const segments = path.split("/").filter((segment) => !/^v\d+$/.test(segment));
+  return (segments[segments.length - 1] ?? path).replace(/\.v\d+$/, "");
+}
+
+function goParameters(list: Node | null, owner: Node, facts: FileFacts): void {
+  for (const parameter of list ? namedChildren(list) : []) {
+    const type = parameter.type === "parameter_declaration" ? goTypeName(parameter.childForFieldName("type")) : null;
+    for (const name of namedChildren(parameter)) {
+      if (name.type !== "identifier") continue;
+      const range = { line: line(owner), endLine: endLine(owner), column: column(owner) };
+      if (type) facts.locals.push({ name: name.text, kind: "instance", type, ...range });
+      else facts.locals.push({ name: name.text, kind: "other", ...range });
+    }
+  }
+}
+
+/** `a, b := x, y`, `var a T`, `var a = T{}`: an instance when the type is written, otherwise just a name that hides outer ones. */
+function goDeclared(names: Node[], type: string | null, values: Node[], at: Node, scope: GoScope, facts: FileFacts): void {
+  // A name declared in the header of `if`, `for` or `switch` lives only as long as that statement.
+  const holder = at.parent?.type === "for_clause" ? at.parent.parent : at.parent;
+  const inHeader = holder && holder.type !== "statement_list" && holder.type !== "block" && holder.type !== "var_declaration" && holder.type !== "var_spec_list";
+  names.forEach((name, index) => {
+    if (name.type !== "identifier" || name.text === "_") return;
+    const range = { line: line(at), endLine: inHeader ? endLine(holder) : scope.scopeEnd, column: column(at) };
+    const known = type ?? (values.length === names.length ? goConstructedType(values[index]) : null);
+    if (known) facts.locals.push({ name: name.text, kind: "instance", type: known, ...range });
+    else facts.locals.push({ name: name.text, kind: "other", ...range });
+  });
+}
+
+function walkGo(node: Node, facts: FileFacts, scope: GoScope): void {
+  switch (node.type) {
+    case "package_clause":
+      facts.package = namedChildren(node)[0]?.text;
+      return;
+    case "const_spec":
+    case "var_spec": {
+      const names = node.childrenForFieldName("name").filter((name): name is Node => name !== null && name.text !== "_");
+      // Package-level constants and variables are not symbols, but they place their users on this file.
+      const packageLevel = node.parent?.parent?.type === "source_file" || node.parent?.parent?.parent?.type === "source_file";
+      if (packageLevel) for (const name of names) facts.exports.push({ exported: name.text, local: name.text });
+      const value = node.childForFieldName("value");
+      if (node.type === "var_spec") goDeclared(names, goTypeName(node.childForFieldName("type")), value ? namedChildren(value) : [], node, scope, facts);
+      break;
+    }
+    case "import_spec": {
+      const path = node.childForFieldName("path");
+      if (!path) return;
+      const specifier = unquote(path.text);
+      const given = node.childForFieldName("name");
+      const alias = given ? given.text : goPackageName(specifier);
+      const named = alias !== "_" && alias !== ".";
+      const fact: ImportFact = { specifier, names: named ? [{ local: alias, imported: "*" }] : [], reexport: false, star: alias === ".", line: line(node), members: [] };
+      facts.imports.push(fact);
+      if (named) scope.packages.set(alias, fact);
+      return;
+    }
+    case "function_declaration": {
+      const name = node.childForFieldName("name")?.text;
+      if (name) addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: /^[A-Z]/.test(name), isDefault: false });
+      goParameters(node.childForFieldName("parameters"), node, facts);
+      goParameters(node.childForFieldName("result"), node, facts);
+      break;
+    }
+    case "method_declaration": {
+      const name = node.childForFieldName("name")?.text;
+      const receiver = node.childForFieldName("receiver");
+      const owner = goTypeName(receiver ? namedChildren(receiver)[0]?.childForFieldName("type") : null);
+      if (name && owner) addSymbol(facts, { name: `${owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: /^[A-Z]/.test(name), isDefault: false });
+      goParameters(receiver, node, facts);
+      goParameters(node.childForFieldName("parameters"), node, facts);
+      goParameters(node.childForFieldName("result"), node, facts);
+      break;
+    }
+    case "func_literal":
+      goParameters(node.childForFieldName("parameters"), node, facts);
+      goParameters(node.childForFieldName("result"), node, facts);
+      break;
+    case "type_spec": {
+      const name = node.childForFieldName("name")?.text;
+      const type = node.childForFieldName("type");
+      if (!name || node.parent?.parent?.type !== "source_file") break;
+      const symbol: SymbolFact = { name, kind: "class", line: line(node), endLine: endLine(node), exported: /^[A-Z]/.test(name), isDefault: false };
+      const list = type?.type === "struct_type" ? namedChildren(type).find((child) => child.type === "field_declaration_list") : undefined;
+      for (const field of list ? namedChildren(list) : []) {
+        const fieldType = goTypeName(field.childForFieldName("type"));
+        if (!fieldType) continue;
+        const names = namedChildren(field).filter((child) => child.type === "field_identifier");
+        // A field with no name is an embedded type: its methods are promoted to this one.
+        if (names.length === 0) (symbol.embeds ??= []).push(fieldType);
+        for (const field of names) (symbol.fields ??= {})[field.text] = fieldType;
+      }
+      addSymbol(facts, symbol);
+      break;
+    }
+    case "short_var_declaration": {
+      const left = node.childForFieldName("left");
+      const right = node.childForFieldName("right");
+      goDeclared(left ? namedChildren(left) : [], null, right ? namedChildren(right) : [], node, scope, facts);
+      break;
+    }
+    case "range_clause": {
+      const left = node.childForFieldName("left");
+      goDeclared(left ? namedChildren(left) : [], null, [], node, scope, facts);
+      break;
+    }
+    case "call_expression": {
+      const callee = node.childForFieldName("function");
+      const at = { line: line(node), column: column(node) };
+      if (callee?.type === "identifier") facts.calls.push({ callee: callee.text, receiver: null, ...at });
+      if (callee?.type !== "selector_expression") break;
+      const operand = callee.childForFieldName("operand");
+      const field = callee.childForFieldName("field");
+      if (!field) break;
+      if (operand?.type === "identifier") facts.calls.push({ callee: field.text, receiver: operand.text, ...at });
+      else if (operand?.type === "selector_expression" && operand.childForFieldName("operand")?.type === "identifier") {
+        facts.calls.push({ callee: field.text, receiver: operand.text, ...at });
+      }
+      break;
+    }
+    case "selector_expression":
+    case "qualified_type": {
+      // `pkg.Name`, called or not: note which names of an imported package this file uses.
+      const owner = node.childForFieldName(node.type === "qualified_type" ? "package" : "operand");
+      const member = node.childForFieldName(node.type === "qualified_type" ? "name" : "field");
+      const used = owner && member ? scope.packages.get(owner.text)?.members : undefined;
+      if (used && member && !used.includes(member.text)) used.push(member.text);
+      break;
+    }
+    case "interpreted_string_literal":
+    case "raw_string_literal":
+      sniffSql(node, facts);
+      return;
+    default:
+      break;
+  }
+
+  const opensScope = node.type === "block" || node.type === "function_declaration" || node.type === "method_declaration" || node.type === "func_literal";
+  const inner = opensScope ? { ...scope, scopeEnd: endLine(node) } : scope;
+  for (const child of namedChildren(node)) walkGo(child, facts, inner);
+}
+
+export function extractGo(root: Node, facts: FileFacts): void {
+  walkGo(root, facts, { packages: new Map(), scopeEnd: endLine(root) });
 }
