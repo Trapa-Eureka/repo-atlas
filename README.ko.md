@@ -8,7 +8,7 @@
 
 > **상태: 초기 개발 단계.**
 > 무료 로컬 기능은 처음부터 끝까지 동작합니다. 저장소를 인덱싱하고(`atlas index`), 파일에 대한 브리핑을 받고(`atlas context`), 변경의 영향 범위를 추적하고(`atlas impact`), 그림으로 그리고(`atlas mermaid`), 에이전트가 같은 질문을 MCP로 하게 할 수 있습니다(`atlas mcp`).
-> 아직 npm에 배포되지 않았습니다. 유료 플랜은 계획 단계입니다.
+> npm에 [`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli)로 배포되어 있습니다. 유료 플랜은 계획 단계입니다.
 
 **바로가기:** [빠른 시작](#빠른-시작) · [사용법](#사용법) · [AI 에이전트에서 쓰기](#ai-에이전트에서-쓰기) · [설치](#설치)
 
@@ -83,7 +83,7 @@ flowchart LR
 | `atlas mermaid`: 파일 단위 전체 그림 또는 노드 하나의 주변 | 완료 |
 | `atlas mcp`: 도구 6개를 가진 MCP 서버(stdio). `atlas init`이 `.mcp.json`에 등록 | 완료 |
 | 로컬 SQLite 인덱스(내장 `node:sqlite`, 컴파일할 것 없음) | 완료 |
-| npm 패키지 배포 | 예정 |
+| npm 패키지 배포 (`repo-atlas-cli`) | 완료 |
 | 언어 추가(Go, Rust, Java, Ruby: 문법 파일은 의존성에 이미 포함) | 예정 |
 | IDE 연동 | 예정 |
 | 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 | 계획중 |
@@ -111,30 +111,26 @@ git 저장소 안에서는 파일 목록을 git에서 받으므로 `.gitignore`�
 ## 요구 사항
 
 - Node.js **22.13 이상** (Node 24에서 개발). 내장 SQLite 모듈에 필요합니다.
-- [pnpm](https://pnpm.io) 10 (소스에서 빌드할 때)
+- [pnpm](https://pnpm.io) 10 (소스에서 빌드할 때만)
 - Git (선택. 파일 목록과 저장소 루트를 찾는 데 씁니다)
 
 ## 설치
 
-아직 npm에 배포되지 않았습니다. 소스에서 설치합니다.
+```bash
+npm install -g repo-atlas-cli
+atlas --version
+```
+
+패키지 이름은 `repo-atlas-cli`이고, 설치되는 명령은 `atlas`입니다. 설치 없이 써 보려면 `npx repo-atlas-cli index`를 실행합니다.
+
+소스에서 빌드하려면 다음과 같이 합니다.
 
 ```bash
 git clone https://github.com/Trapa-Eureka/repo-atlas.git
 cd repo-atlas
 pnpm install
 pnpm build
-```
-
-배포 전까지는 빌드 결과물로 실행합니다. 편하게 쓰려면 alias를 추가하세요(경로는 맞게 바꿉니다).
-
-```bash
-alias atlas='node /path/to/repo-atlas/dist/cli/main.js'
-```
-
-npm 배포는 예정되어 있습니다. 배포되면 다음 명령으로 설치할 수 있습니다.
-
-```bash
-npm install -g repo-atlas
+alias atlas='node /path/to/repo-atlas/dist/cli/main.js'   # 경로는 맞게 바꿉니다
 ```
 
 ## 빠른 시작
@@ -208,7 +204,7 @@ atlas init        # .mcp.json에 "repo-atlas"를 추가하고 다른 서버는 �
 }
 ```
 
-`atlas` 명령이 에이전트의 `PATH`에 있어야 합니다. 패키지가 배포되기 전까지는 `"command": "atlas", "args": ["mcp"]`를 `"command": "node", "args": ["/path/to/repo-atlas/dist/cli/main.js", "mcp"]`로 바꾸세요.
+`atlas` 명령이 에이전트의 `PATH`에 있어야 합니다. 소스에서 실행할 때는 `"command": "atlas", "args": ["mcp"]`를 `"command": "node", "args": ["/path/to/repo-atlas/dist/cli/main.js", "mcp"]`로 바꾸세요.
 
 | 도구 | 답하는 질문 |
 |---|---|
@@ -297,7 +293,7 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
 - [x] **Phase 2**: 그래프: 연결, SQLite 저장소, 증분 인덱싱
 - [x] **Phase 3**: 질의와 CLI: `search`, `context`, `impact`, `path`, `mermaid`, `stats`, `export`
 - [x] **Phase 4**: 에이전트: MCP 서버, `atlas init`
-- [ ] **Phase 5**: 릴리스: npm 패키지, 언어 추가, IDE 연동
+- [ ] **Phase 5**: 릴리스: npm 패키지(완료: `repo-atlas-cli`), 언어 추가, IDE 연동
 - [ ] **Phase 6**: 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 (계획중)
 
 ## 기여

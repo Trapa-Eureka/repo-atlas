@@ -6,7 +6,7 @@ A local CLI that maps how the files, functions, SQL tables, env keys and docs of
 
 > **Status: early development.**
 > The free, local tier works end to end: index a repository (`atlas index`), ask for a briefing on a file (`atlas context`), trace what a change affects (`atlas impact`), draw the result (`atlas mermaid`), and let an agent ask the same questions over MCP (`atlas mcp`).
-> It is not published to npm yet. Paid plans are still in planning.
+> It is on npm as [`repo-atlas-cli`](https://www.npmjs.com/package/repo-atlas-cli). Paid plans are still in planning.
 
 **Jump to:** [Quick start](#quick-start) · [Usage](#usage) · [Use it from an AI agent](#use-it-from-an-ai-agent) · [Installation](#installation)
 
@@ -81,7 +81,7 @@ flowchart LR
 | `atlas mermaid`: file overview or the neighbourhood of one node                                                                                          | Done    |
 | `atlas mcp`: MCP server (stdio) with six tools; `atlas init` registers it in `.mcp.json`                                                                 | Done    |
 | Local SQLite index (built-in `node:sqlite`, nothing to compile)                                                                                          | Done    |
-| Published npm package                                                                                                                                    | Planned |
+| Published npm package (`repo-atlas-cli`)                                                                                                                 | Done    |
 | More languages (Go, Rust, Java, Ruby: the grammars already ship with the dependency)                                                                     | Planned |
 | IDE integration                                                                                                                                          | Planned |
 | Paid plans: hosted indexing of private repositories, shared team graph, CI integration                                                                   | Planned |
@@ -109,30 +109,26 @@ Inside a git repository the file list comes from git, so `.gitignore` is honoure
 ## Requirements
 
 - Node.js **22.13 or newer** (developed on Node 24). The built-in SQLite module needs it.
-- [pnpm](https://pnpm.io) 10, to build from source
+- [pnpm](https://pnpm.io) 10, only to build from source
 - Git (optional; used to list files and to find the repository root)
 
 ## Installation
 
-The package is not published to npm yet. Install from source:
+```bash
+npm install -g repo-atlas-cli
+atlas --version
+```
+
+The package is named `repo-atlas-cli`; the command it installs is `atlas`. To try it without installing, use `npx repo-atlas-cli index`.
+
+To build from source instead:
 
 ```bash
 git clone https://github.com/Trapa-Eureka/repo-atlas.git
 cd repo-atlas
 pnpm install
 pnpm build
-```
-
-Until the CLI is published, run it from the build output. For convenience, add an alias (adjust the path):
-
-```bash
-alias atlas='node /path/to/repo-atlas/dist/cli/main.js'
-```
-
-Publishing to npm is planned. Once it is published, you will be able to install the CLI with:
-
-```bash
-npm install -g repo-atlas
+alias atlas='node /path/to/repo-atlas/dist/cli/main.js'   # adjust the path
 ```
 
 ## Quick start
@@ -206,7 +202,7 @@ or add it by hand:
 }
 ```
 
-The `atlas` command must be on the agent's `PATH`; until the package is published, replace `"command": "atlas", "args": ["mcp"]` with `"command": "node", "args": ["/path/to/repo-atlas/dist/cli/main.js", "mcp"]`.
+The `atlas` command must be on the agent's `PATH`; when running from source, replace `"command": "atlas", "args": ["mcp"]` with `"command": "node", "args": ["/path/to/repo-atlas/dist/cli/main.js", "mcp"]`.
 
 | Tool            | Answers                                                                    |
 | --------------- | -------------------------------------------------------------------------- |
@@ -295,7 +291,7 @@ TypeScript (ESM) on Node.js 22+ · [web-tree-sitter](https://github.com/tree-sit
 - [x] **Phase 2**: graph: linking, SQLite store, incremental indexing
 - [x] **Phase 3**: queries and CLI: `search`, `context`, `impact`, `path`, `mermaid`, `stats`, `export`
 - [x] **Phase 4**: agents: MCP server, `atlas init`
-- [ ] **Phase 5**: release: npm package, more languages, IDE integration
+- [ ] **Phase 5**: release: npm package (done: `repo-atlas-cli`), more languages, IDE integration
 - [ ] **Phase 6**: paid plans: hosted private-repository indexing, shared team graph, CI integration (planned)
 
 ## Contributing

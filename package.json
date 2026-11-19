@@ -1,5 +1,5 @@
 {
-  "name": "repo-atlas",
+  "name": "repo-atlas-cli",
   "version": "0.1.0",
   "description": "Local codebase knowledge graph CLI: maps how code, SQL tables, config and docs relate, for humans and AI coding agents",
   "license": "MIT",
@@ -10,7 +10,7 @@
   },
   "bin": {
     "atlas": "dist/cli/main.js",
-    "repo-atlas": "dist/cli/main.js"
+    "repo-atlas-cli": "dist/cli/main.js"
   },
   "files": [
     "dist",
