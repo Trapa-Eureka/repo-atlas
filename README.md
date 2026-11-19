@@ -231,7 +231,8 @@ Each tool call first re-indexes changed files, so the answers match the working 
 - Docs are linked only through relative links and backticked names. A backticked common word that happens to be the only function of that name will be linked; this is the least reliable kind of edge (see the numbers below).
 - Env keys are matched in the source text, so a key named inside a string or a comment counts as a use.
 - Only top-level functions, classes and their methods are symbols. Nested functions are attributed to the function that contains them.
-- **Measured accuracy is a sample, not a proof.** Ten public repositories were indexed (express, flask, httpx, got, swr, hono, datasette, full-stack-fastapi-template, umami, trpc: 4,903 files, about 54,000 relations; the largest, 1,741 files, took 1.6 s). 180 randomly drawn edges were checked by hand against the source: calls 40/40, imports 30/30, table edges 40/40, env edges 29/30, doc edges 38/40. Of roughly 12,000 local imports, 70 were left unresolved; 67 of those point at files that are not in the repository (generated clients, build output). This measures wrong edges only. Missing edges were not counted, and the first limitation above means there are many.
+- **Measured accuracy is a sample, not a proof.** Ten public repositories were indexed (express, flask, httpx, got, swr, hono, datasette, full-stack-fastapi-template, umami, trpc: 4,903 files, about 54,000 relations; the largest, 1,741 files, took 1.6 s). 180 randomly drawn edges were checked by hand against the source: calls 40/40, imports 30/30, table edges 40/40, env edges 29/30, doc edges 38/40. Of roughly 12,000 local imports, 70 were left unresolved; 67 of those point at files that are not in the repository (generated clients, build output). That sample measures wrong edges only.
+- **Missing edges, measured against the TypeScript compiler.** On the seven of those repositories that contain TypeScript or JavaScript, every call and import the compiler could resolve to a file of the repository was looked up in the graph (`scripts/recall.mjs`). Imports: 10,521 of 10,527 found (99.9%). Calls: 11,743 of 15,312 found (76.7%), or 84.5% when calls to nested functions, which are not symbols by design, are left out. What is missed, largest first: functions reached through an imported object (`const { parse } = db`), methods called on a variable or through a chain (they need types), functions called under another name (alias, default or CommonJS export), and targets that are not symbols (anonymous functions, object members, class properties). The repositories were not installed, so calls the compiler could not resolve without their dependencies are outside this count, and Python was not measured.
 - Developed on macOS; Linux should work, Windows is untested. Node's built-in SQLite is still marked experimental by Node; `atlas` hides its startup warning.
 
 ## Paid plans (planned)
@@ -277,7 +278,7 @@ repo-atlas/
 ├── test/          # extractor, linker (property-based), CLI and MCP tests
 ├── fixtures/shop/ # sample repository indexed by the tests
 ├── assets/        # README screenshots and the social preview image
-├── scripts/       # regenerate the images in assets/ (`pnpm screenshots`)
+├── scripts/       # regenerate the images in assets/ (`pnpm screenshots`), measure missed edges (`recall.mjs`)
 ├── .claude/
 │   ├── settings.json
 │   ├── hooks/     # dev-time hooks and their tests
