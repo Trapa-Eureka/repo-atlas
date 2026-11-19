@@ -926,4 +926,57 @@ describe("Ruby", () => {
   it("links a doc that names a Ruby class by the last part of its name", async () => {
     expect(await edgesOf("documents", { "docs/notes.md": "See `Policy`.\n", "lib/returns/policy.rb": "module Returns\n  class Policy\n  end\nend\n" })).toEqual(["docs/notes.md -> lib/returns/policy.rb#Returns::Policy"]);
   });
+
+  it("reads a value's class from its name when nothing else says it, and only where the class has the method", async () => {
+    const models = {
+      "app/models/account.rb": "class Account\n  def keypair; end\n\n  def local?; end\n\n  def acct; end\n\n  def note; end\n\n  def wrapped\n    @account.note\n  end\nend\n",
+      "app/models/cache.rb": "class Cache\n  def key?(k); end\nend\n",
+      "app/models/error.rb": "class Error\n  def message; end\nend\n",
+      "app/lib/parser.rb": "class Parser\n  class Scope\n    def merge(other); end\n  end\n\n  def run(scope)\n    scope.merge(1)\n  end\nend\n",
+      "app/lib/shop.rb": "module Shop\n  def self.open; end\n\n  class Item\n    def price; end\n  end\nend\n",
+      "app/lib/api/token.rb": "module Api\n  class Token\n    def fresh?; end\n  end\nend\n",
+      "app/lib/admin/token.rb": "module Admin\n  class Token\n    def fresh?; end\n  end\nend\n",
+      "lib/cli/accounts.rb": "module Cli\n  class Accounts\n    def merge(other); end\n  end\nend\n",
+      "db/migrate/1_fix.rb": "class Fix\n  class Account\n    def keypair; end\n  end\nend\n",
+    };
+    const from = async (body: string) =>
+      (await edgesOf("calls", { ...models, "app/services/job.rb": `class Job\n${body}end\n` }))
+        .filter((edge) => edge.startsWith("app/services/job.rb"))
+        .map((edge) => edge.replace(/^app\/services\/job\.rb#Job\.\w+ -> /, "").replace(/^app\/(?:models|lib)\//, ""));
+
+    // Each of the four places a name can stand: a parameter, a name with words before it, an instance
+    // variable, a method of the object itself. Of two classes called Account the one at the top is meant.
+    expect(await from("  def run(account)\n    account.keypair\n  end\n")).toEqual(["account.rb#Account.keypair"]);
+    expect(await from("  def run(target_account)\n    target_account.local?\n  end\n")).toEqual(["account.rb#Account.local?"]);
+    expect(await from("  def run\n    @account.acct\n  end\n")).toEqual(["account.rb#Account.acct"]);
+    expect(await from("  def run\n    current_account.note\n  end\n")).toEqual(["account.rb#Account.note"]);
+    // A value passed on under its name, or made by the class of that name, keeps it.
+    expect(await from("  def initialize(account)\n    @account = account\n  end\n\n  def run(id)\n    @account.acct\n    account = Account.find(id)\n    account.note\n  end\n")).toEqual(["account.rb#Account.acct", "account.rb#Account.note"]);
+    expect(await from("  def run(status)\n    account = status.account\n    account.local?\n    cache = Rails.cache\n    cache.key?(1)\n  end\n")).toEqual(["account.rb#Account.local?"]);
+    // A class in a module is found by its last name, when it is the only one of that name.
+    expect(await from("  def run(item, token)\n    item.price\n    token.fresh?\n  end\n")).toEqual(["shop.rb#Shop::Item.price"]);
+
+    // Not when the class has no such method, or when the file gave the name a value of its own making.
+    const none = [
+      "  def run(account)\n    account.domain\n  end\n",
+      "  def run\n    cache = {}\n    cache.key?(1)\n  end\n",
+      "  def run(id)\n    account = User.find(id)\n    account.keypair\n  end\n",
+      "  def run(params)\n    account = params[:account]\n    account.keypair\n  end\n",
+      "  def run(pair)\n    account, other = pair\n    account.keypair\n  end\n",
+      "  def initialize(hash)\n    @cache = hash\n  end\n\n  def run\n    @cache.key?(1)\n  end\n",
+      "  def run(cache = {}, account: 5)\n    cache.key?(1)\n    account.keypair\n  end\n",
+      "  def run\n    work\n  rescue Timeout::Error => error\n    error.message\n  end\n",
+      // A class kept inside another class is that class's helper; a plural somewhere else is not the one class of that name.
+      "  def run(scope)\n    scope.merge(1)\n  end\n",
+      "  def run(default_accounts)\n    default_accounts.merge(1)\n  end\n",
+    ];
+    for (const body of none) expect(await from(body), body).toEqual([]);
+    expect(await from("  def run\n    account = Account.new\n    account = lookup\n    account.keypair\n  end\n")).toEqual(["account.rb#Account"]);
+    // A helper that keeps a plain value: the call of the helper is linked, a `Cache#key?` on what it returns is not.
+    expect(await from("  def cache\n    @cache ||= {}\n  end\n\n  def run\n    cache.key?(1)\n  end\n")).toEqual(["app/services/job.rb#Job.cache"]);
+
+    const inside = (await edgesOf("calls", models)).filter((edge) => !edge.startsWith("app/services"));
+    // Inside `Parser`, `scope` is its own `Scope`. Inside `Account`, `@account` is whatever the class wraps, not the class.
+    expect(inside).toEqual(["app/lib/parser.rb#Parser.run -> app/lib/parser.rb#Parser::Scope.merge"]);
+  });
 });

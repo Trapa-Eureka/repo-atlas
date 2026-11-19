@@ -139,6 +139,8 @@ class Linker {
   private readonly rubyConstants = new Map<string, FileFacts[]>();
   /** Ruby: file name without `.rb` → the files of that name, to find what a `require` names. */
   private readonly rubyByName = new Map<string, string[]>();
+  /** Ruby: `order_item` → the full names of the classes and modules called `OrderItem`, to read a variable's name as its class. */
+  private readonly rubyByWord = new Map<string, string[]>();
   /** Ruby: file → the files it requires, where its top-level methods may come from. */
   private readonly rubyRequired = new Map<string, string[]>();
   private readonly definedTables = new Set<string>();
@@ -172,7 +174,11 @@ class Linker {
           if (list) list.push(value);
           else map.set(key, [value]);
         };
-        for (const symbol of facts.symbols) if (symbol.kind === "class") add(this.rubyTypes, symbol.name, { facts, symbol });
+        for (const symbol of facts.symbols) {
+          if (symbol.kind !== "class") continue;
+          if (!this.rubyTypes.has(symbol.name)) add(this.rubyByWord, rubyUnderscore(symbol.name.split("::").pop() ?? symbol.name), symbol.name);
+          add(this.rubyTypes, symbol.name, { facts, symbol });
+        }
         for (const constant of facts.exports) add(this.rubyConstants, constant.exported, facts);
         if (facts.path.endsWith(".rb")) add(this.rubyByName, posix.basename(facts.path, ".rb"), facts.path);
       }
@@ -670,8 +676,50 @@ class Linker {
       const [home] = this.rubyHomes(type, facts.path);
       return home ? symbolId(home.facts.path, type.name) : null;
     }
-    const local = this.local(facts, call.receiver, call.line, call.column);
-    return local?.kind === "instance" && local.type ? this.rubyMethod(typeOf(local.type), call.callee) : null;
+    // `repo.find` where `repo` is a method of the object itself: what `@repo` holds, when the class keeps one.
+    const name = call.receiver.startsWith(".") ? `@${call.receiver.slice(1)}` : call.receiver;
+    const local = this.local(facts, name, call.line, call.column);
+    if (local?.kind === "instance" && local.type) return this.rubyMethod(typeOf(local.type), call.callee);
+    if (local) return null;
+    // Nothing says what the value is, except its name: `order_item.total` is taken for `OrderItem#total`
+    // when there is such a class and it has such a method. A name the file gave another value to is left alone,
+    // and so is a name that would be the class it is written in: `@cache` inside `Cache` is what the class wraps.
+    const named = this.rubyNamed(facts, name.replace(/^@/, ""), call.line);
+    return named && named.name !== ownerName ? this.rubyMethod(named, call.callee) : null;
+  }
+
+  /** Whether one of the names a Ruby class is nested in is a class, not a module. */
+  private rubyInsideClass(full: string): boolean {
+    const parts = full.split("::");
+    for (let count = parts.length - 1; count > 0; count--) {
+      const outer = this.rubyTypes.get(parts.slice(0, count).join("::"));
+      if (outer && !outer.every((declared) => declared.symbol.namespace)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The class a Ruby name is called after: `account` and `target_account` are an `Account`. Among
+   * classes of that name, the one in a namespace around the line, else the only one there is.
+   */
+  private rubyNamed(facts: FileFacts, name: string, line: number): { name: string; declared: Declared[] } | null {
+    const words = name.replace(/[?!]$/, "").split("_").filter(Boolean);
+    const nesting = this.rubyNesting(facts, line);
+    for (let start = 0; start < words.length; start++) {
+      const candidates = this.rubyByWord.get(words.slice(start).join("_"));
+      if (!candidates) continue;
+      const near = nesting.map((space) => candidates.find((full) => full.startsWith(`${space}::`) && !full.slice(space.length + 2).includes("::"))).find((full) => full !== undefined);
+      // From outside, only a class that stands on its own counts: one kept inside another class (`Parser::Scope`)
+      // is that class's helper, and a variable called `scope` somewhere else is not it.
+      const standalone = candidates.filter((full) => !this.rubyInsideClass(full));
+      // As a constant of that name would be found: in a namespace around, else at the top, else the only one there is.
+      const top = candidates.find((full) => !full.includes("::"));
+      // The last of these only for the whole name: `default_accounts` is not the one `Cli::Accounts` there happens to be.
+      const full = near ?? top ?? (start === 0 && standalone.length === 1 && candidates.length === 1 ? standalone[0] : undefined);
+      const declared = full ? this.rubyTypes.get(full) : undefined;
+      return full && declared ? { name: full, declared } : null;
+    }
+    return null;
   }
 
   /** A method as the parents of a class have it, not the class itself. */

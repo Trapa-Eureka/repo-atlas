@@ -18,6 +18,8 @@ export interface SymbolFact {
    * For a Java method: the class it returns, as written in its file, or `?` when that is not one class (a type parameter, overloads that differ).
    */
   returns?: string;
+  /** For a Ruby module: it is a `module`, not a `class`. What it holds is named through it, where what a class holds is that class's own business. */
+  namespace?: boolean;
   /** For a Java method: its parameter types as written, joined by commas. An inherited method with the same list is overridden, one with another list is an overload. */
   params?: string;
   /** For a Go struct: field name → the type written for it (`Store`, `db.Repo`). */

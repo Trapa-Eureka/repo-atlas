@@ -259,7 +259,11 @@ end
     ]);
     expect(facts.exports).toEqual([{ exported: "Shop::Order::LIMIT", local: "LIMIT" }]);
     expect(facts.uses?.map((use) => use.name)).toEqual(["Record", "Priced", "Repo", "ENV", "Shop::Order"]);
-    expect(facts.locals).toEqual([{ name: "@repo", kind: "instance", type: "Repo", line: 6, endLine: 27 }]);
+    expect(facts.locals).toEqual([
+      { name: "@repo", kind: "instance", type: "Repo", line: 6, endLine: 27 },
+      // `rows` holds what a call gave: the file says so, and its name is not to be read as a class.
+      { name: "rows", kind: "other", line: 19, endLine: 21, column: 64 },
+    ]);
     expect(facts.calls.map((call) => `${call.receiver ?? ""}.${call.callee}`)).toEqual([".include", "Repo.new", ".new", "@repo.load", "rows.sum", ".tax", "ENV.fetch", "Shop::Order.find"]);
     expect(facts.tables.map((table) => `${table.op}:${table.name}`)).toEqual(["read:orders"]);
     expect(facts.envs.map((env) => env.name).sort()).toEqual(["REGION", "STAGE"]);
