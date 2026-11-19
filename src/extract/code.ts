@@ -84,7 +84,8 @@ function scriptCall(node: Node, facts: FileFacts): void {
   const object = callee.childForFieldName("object");
   const property = callee.childForFieldName("property");
   if (!object || !property) return;
-  if (property.text === "from" && !NOT_A_QUERY_BUILDER.has(object.text)) {
+  // `db.from("users")` and `DB.from("users")` are query builders; `Readable.from("x")`, a static method of a class, is not.
+  if (property.text === "from" && !NOT_A_QUERY_BUILDER.has(object.text) && !/(?:^|\.)[A-Z][A-Z0-9_]*[a-z]\w*$/.test(object.text)) {
     const table = firstStringArgument(node);
     if (table && /^[A-Za-z_]\w*$/.test(table)) facts.tables.push({ name: table.toLowerCase(), op: "read", line: line(node) });
   }

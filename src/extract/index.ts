@@ -2,13 +2,13 @@ import { basename, extname } from "node:path";
 import { extractPython, extractScript } from "./code.js";
 import { emptyFacts, type FileFacts, type Language, type TableFact } from "./facts.js";
 import { parserFor, type Grammar } from "./parser.js";
-import { tablesInSql } from "./sql.js";
+import { cteNamesIn, tablesInSql } from "./sql.js";
 import { envDeclarations, envUses, markdownRefs } from "./text.js";
 
 export type { CallFact, DocRefFact, EnvFact, FileFacts, ImportFact, ImportedName, Language, SymbolFact, TableFact } from "./facts.js";
 
 /** Bump when extraction output changes, so existing indexes re-parse every file. */
-export const EXTRACTOR_VERSION = 1;
+export const EXTRACTOR_VERSION = 2;
 
 const BY_EXTENSION: Record<string, Language> = {
   ".ts": "typescript",
@@ -68,6 +68,10 @@ export async function extractFile(path: string, source: string): Promise<FileFac
     case "javascript":
     case "python":
       await extractCode(source, facts, language);
+      if (facts.tables.some((table) => table.op === "read")) {
+        const ctes = cteNamesIn(source);
+        facts.tables = facts.tables.filter((table) => table.op !== "read" || !ctes.has(table.name));
+      }
       break;
     case "sql":
       facts.tables = tablesInSql(source);

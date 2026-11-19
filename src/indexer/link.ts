@@ -42,12 +42,16 @@ function isScript(facts: FileFacts): boolean {
   return facts.language === "typescript" || facts.language === "tsx" || facts.language === "javascript";
 }
 
+/** Normalizes a repository-relative path. `""` is the repository root, `null` is outside it. */
 function inside(path: string): string | null {
   const normalized = posix.normalize(path);
-  return normalized.startsWith("..") || normalized === "." ? null : normalized.replace(/\/$/, "");
+  if (normalized === "." || normalized === "./") return "";
+  return normalized.startsWith("..") ? null : normalized.replace(/\/$/, "");
 }
 
 function scriptCandidates(base: string): string[] {
+  // The repository root can only be a folder import: `require("../..")` from examples/x/index.js.
+  if (base === "") return SCRIPT_EXTENSIONS.map((added) => `index${added}`);
   const candidates = [base];
   const extension = posix.extname(base);
   for (const source of COMPILED_TO_SOURCE[extension] ?? []) candidates.push(base.slice(0, -extension.length) + source);
@@ -135,7 +139,7 @@ class Linker {
   private resolveScript(from: string, specifier: string): { file: string | null; local: boolean } {
     if (specifier.startsWith(".")) {
       const base = inside(posix.join(posix.dirname(from), specifier));
-      return { file: base ? this.firstIndexed(scriptCandidates(base)) : null, local: true };
+      return { file: base === null ? null : this.firstIndexed(scriptCandidates(base)), local: true };
     }
     for (const alias of this.aliases) {
       if (alias.scope && !from.startsWith(`${alias.scope}/`)) continue;

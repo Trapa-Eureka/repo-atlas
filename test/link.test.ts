@@ -37,6 +37,16 @@ describe("link", () => {
     ]);
   });
 
+  it("resolves an import of the repository root folder", () => {
+    const edges = edgeList([
+      script("examples/auth/index.js", { imports: [imports("../.."), imports("../../")] }),
+      script("test/app.js", { imports: [imports(".."), imports("../")] }),
+      script("index.js"),
+    ]);
+    expect(edges).toEqual(["file:examples/auth/index.js -imports-> file:index.js", "file:test/app.js -imports-> file:index.js"]);
+    expect(link([script("test/app.js", { imports: [imports("../..")] }), script("index.js")]).unresolved).toHaveLength(1);
+  });
+
   it("reports unresolved local imports instead of inventing packages", () => {
     const result = link([script("src/a.ts", { imports: [imports("./missing"), imports("./style.css"), imports("../../outside")] })]);
     expect(result.unresolved.map((item) => item.specifier)).toEqual(["./missing", "../../outside"]);

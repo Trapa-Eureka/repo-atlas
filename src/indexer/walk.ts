@@ -5,8 +5,11 @@ import { languageOf } from "../extract/index.js";
 
 export const MAX_FILE_BYTES = 1024 * 1024;
 
-const IGNORED_FOLDERS = new Set([
-  ".git", ".atlas", "node_modules", "dist", "build", "out", "coverage", "vendor", "target",
+/** Never indexed, even when tracked by git. */
+const ALWAYS_IGNORED = new Set([".git", ".atlas", "node_modules"]);
+/** Output and cache folders, skipped wherever git does not vouch for them: outside a repository, and for untracked files inside one. */
+const IGNORED_WITHOUT_GIT = new Set([
+  ...ALWAYS_IGNORED, "dist", "build", "out", "coverage", "vendor", "target",
   ".next", ".nuxt", ".turbo", ".cache", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
 ]);
 const PROJECT_CONFIGS = new Set(["tsconfig.json", "jsconfig.json", "package.json"]);
@@ -24,9 +27,9 @@ export interface WalkResult {
   skippedLarge: number;
 }
 
-function gitFiles(root: string): string[] | null {
+function git(root: string, flags: string[]): string[] | null {
   try {
-    const out = execFileSync("git", ["-C", root, "ls-files", "-co", "--exclude-standard", "-z"], {
+    const out = execFileSync("git", ["-C", root, "ls-files", ...flags, "-z"], {
       encoding: "utf8",
       maxBuffer: 512 * 1024 * 1024,
       stdio: ["ignore", "pipe", "ignore"],
@@ -37,12 +40,26 @@ function gitFiles(root: string): string[] | null {
   }
 }
 
+const skips = (path: string, folders: ReadonlySet<string>): boolean => path.split("/").some((segment) => folders.has(segment));
+
+/**
+ * Tracked files, plus untracked files that `.gitignore` does not exclude. A tracked `build/` or
+ * `vendor/` folder is source someone chose to commit; an untracked one is output nobody has
+ * ignored yet, so it gets the same treatment as outside git.
+ */
+function gitFiles(root: string): string[] | null {
+  const tracked = git(root, ["-c"]);
+  if (!tracked) return null;
+  const untracked = git(root, ["-o", "--exclude-standard"]) ?? [];
+  return [...tracked.filter((path) => !skips(path, ALWAYS_IGNORED)), ...untracked.filter((path) => !skips(path, IGNORED_WITHOUT_GIT))];
+}
+
 function diskFiles(root: string, folder = ""): string[] {
   const found: string[] = [];
   for (const entry of readdirSync(join(root, folder), { withFileTypes: true })) {
     const path = folder ? `${folder}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
-      if (!IGNORED_FOLDERS.has(entry.name)) found.push(...diskFiles(root, path));
+      if (!IGNORED_WITHOUT_GIT.has(entry.name)) found.push(...diskFiles(root, path));
     } else if (entry.isFile()) {
       found.push(path);
     }
@@ -54,7 +71,6 @@ function diskFiles(root: string, folder = ""): string[] {
 export function walk(root: string): WalkResult {
   const result: WalkResult = { files: [], configs: [], skippedLarge: 0 };
   for (const path of (gitFiles(root) ?? diskFiles(root)).sort()) {
-    if (path.split("/").some((segment) => IGNORED_FOLDERS.has(segment))) continue;
     if (PROJECT_CONFIGS.has(basename(path))) {
       result.configs.push(path);
       continue;

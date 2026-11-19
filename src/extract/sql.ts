@@ -1,17 +1,18 @@
 import type { TableFact, TableOp } from "./facts.js";
 
+// "create table" must go on to a column list or a source, so that prose such as "Create table in {db}" is not SQL.
 const SQL_SHAPE =
-  /\bselect\b[\s\S]+?\bfrom\b|\binsert\s+into\b|\bupdate\s+[\w."`]+\s+set\b|\bdelete\s+from\b|\bcreate\s+table\b|\balter\s+table\b/i;
+  /\bselect\b[\s\S]+?\bfrom\b|\binsert\s+into\b|\bupdate\s+[\w."`]+\s+set\b|\bdelete\s+from\b|\bcreate\s+(?:temp(?:orary)?\s+|unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?(?:"[^"]+"|`[^`]+`|\S+)\s*(?:\(|(?:as|like|partition|using|inherits|select|with|of)\b)|\balter\s+table\b/i;
 
 const NAME = "((?:[A-Za-z_][\\w$]*|\"[^\"]+\"|`[^`]+`)(?:\\.(?:[A-Za-z_][\\w$]*|\"[^\"]+\"|`[^`]+`))?)";
 
-const PATTERNS: { op: TableOp; re: RegExp }[] = [
+const PATTERNS: { op: TableOp; re: RegExp; source?: boolean }[] = [
   { op: "define", re: new RegExp(`\\bcreate\\s+(?:temp(?:orary)?\\s+|unlogged\\s+)?table\\s+(?:if\\s+not\\s+exists\\s+)?${NAME}`, "gi") },
   { op: "write", re: new RegExp(`\\balter\\s+table\\s+(?:if\\s+exists\\s+)?(?:only\\s+)?${NAME}`, "gi") },
   { op: "write", re: new RegExp(`\\binsert\\s+(?:or\\s+\\w+\\s+)?into\\s+${NAME}`, "gi") },
   { op: "write", re: new RegExp(`\\bupdate\\s+(?:only\\s+)?${NAME}\\s+set\\b`, "gi") },
   { op: "write", re: new RegExp(`\\bdelete\\s+from\\s+(?:only\\s+)?${NAME}`, "gi") },
-  { op: "read", re: new RegExp(`\\b(?:from|join)\\s+(?:only\\s+)?${NAME}`, "gi") },
+  { op: "read", source: true, re: new RegExp(`\\b(?:from|join)\\s+(?:only\\s+)?${NAME}`, "gi") },
   { op: "read", re: new RegExp(`\\breferences\\s+${NAME}`, "gi") },
 ];
 
@@ -24,7 +25,22 @@ const NOT_A_TABLE = new Set([
 const FROM_INSIDE_FUNCTION = /\b(?:extract|substring|trim|overlay|position)\s*\([^()]*$/i;
 const FROM_AFTER_KEYWORD = /\b(?:delete|distinct)\s+$/i;
 
-const SQL_START = /^\s*\(?\s*(?:select|insert|update|delete|create|alter|with)\b/i;
+const CTE_BODY = "\\s+as\\s+(?:materialized\\s+)?\\(\\s*(?:select|with|values)\\b";
+// A statement, or a piece of one that code glues into a WITH clause: "recent as (select ...)".
+const SQL_START = new RegExp(`^(?:\\s|\\\\[nrt])*\\(?\\s*(?:(?:select|insert|update|delete|create|alter|with)\\b|[A-Za-z_]\\w*${CTE_BODY})`, "i");
+const CTE_ANYWHERE = new RegExp(`(?:^|\\bwith\\s+(?:recursive\\s+)?|[\`'",]|\\\\[nrt])\\s*([A-Za-z_]\\w*)${CTE_BODY}`, "gim");
+
+/**
+ * Names a source file defines as common table expressions, in any of its strings. Code builds one
+ * query from several strings ("WITH recent AS (" here, "FROM recent" there), so a read of such a
+ * name anywhere in the file is taken to be the CTE. The price: a real table that shares its name
+ * with a CTE of the same file loses its reads from that file.
+ */
+export function cteNamesIn(source: string): Set<string> {
+  const names = new Set<string>();
+  for (const match of source.matchAll(CTE_ANYWHERE)) names.add((match[1] ?? "").toLowerCase());
+  return names;
+}
 
 /** Whether a string literal in code is a SQL statement, as opposed to prose that happens to say "select ... from". */
 export function looksLikeSql(text: string): boolean {
@@ -57,11 +73,16 @@ export function tablesInSql(sql: string, firstLine = 1): TableFact[] {
   }
 
   const found = new Map<string, TableFact>();
-  for (const { op, re } of PATTERNS) {
+  for (const { op, re, source } of PATTERNS) {
     for (const match of text.matchAll(re)) {
       const name = tableName(match[1] ?? "");
-      if (!name || NOT_A_TABLE.has(name) || cteNames.has(name)) continue;
-      if (op === "read") {
+      // A name with a placeholder in or right after it ("{table}", table_{i}, prefix_${n}) is filled in at
+      // run time, and one followed by a quote is the first half of an escaped quoted name.
+      if (!name || NOT_A_TABLE.has(name) || cteNames.has(name) || /[{}]/.test(name)) continue;
+      if (/^(?:\$?\{|["`])/.test(text.slice(match.index + match[0].length))) continue;
+      if (source) {
+        // FROM unnest(...), JOIN jsonb_array_elements(...): a function that returns rows, not a table.
+        if (/^\s*\(/.test(text.slice(match.index + match[0].length))) continue;
         const before = text.slice(Math.max(0, match.index - 80), match.index);
         if (FROM_INSIDE_FUNCTION.test(before) || FROM_AFTER_KEYWORD.test(before)) continue;
       }

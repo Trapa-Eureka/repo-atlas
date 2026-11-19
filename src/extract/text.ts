@@ -8,11 +8,22 @@ const SCRIPT_ENV = [
   new RegExp(`\\bDeno\\.env\\.get\\(\\s*["'\`]${ENV_NAME}["'\`]`, "g"),
 ];
 
-const PYTHON_ENV = [
-  new RegExp(`\\benviron\\[\\s*["']${ENV_NAME}["']\\s*\\]`, "g"),
-  new RegExp(`\\benviron\\.get\\(\\s*["']${ENV_NAME}["']`, "g"),
+// `environ` alone is also what WSGI calls a request's variables, so it counts only as `os.environ`
+// (or under an alias of `os`), after `from os import environ`, or after `environ = os.environ`.
+const pythonEnv = (environ: string) => [
+  new RegExp(`${environ}\\[\\s*["']${ENV_NAME}["']\\s*\\]`, "g"),
+  new RegExp(`${environ}\\.get\\(\\s*["']${ENV_NAME}["']`, "g"),
   new RegExp(`\\bgetenv\\(\\s*["']${ENV_NAME}["']`, "g"),
 ];
+const BARE_ENVIRON = "(?<![\\w.])environ";
+const BINDS_ENVIRON = /^\s*(?:from\s+os\s+import\s+(?:\([^)]*\benviron\b|[^\n#]*\benviron\b)|environ\s*=\s*\w+\.environ\b)/m;
+const OS_ALIAS = /^\s*import\s+os\s+as\s+(\w+)/gm;
+
+function pythonPatterns(source: string): RegExp[] {
+  const modules = ["os", ...[...source.matchAll(OS_ALIAS)].map((match) => match[1] ?? "os")];
+  const patterns = pythonEnv(`(?<![\\w.])(?:${modules.join("|")})\\.environ`);
+  return BINDS_ENVIRON.test(source) ? [...patterns, ...pythonEnv(BARE_ENVIRON)] : patterns;
+}
 
 function lineOf(source: string, offset: number): number {
   let line = 1;
@@ -21,7 +32,7 @@ function lineOf(source: string, offset: number): number {
 }
 
 export function envUses(source: string, language: Language): EnvFact[] {
-  const patterns = language === "python" ? PYTHON_ENV : SCRIPT_ENV;
+  const patterns = language === "python" ? pythonPatterns(source) : SCRIPT_ENV;
   const found = new Map<string, EnvFact>();
   for (const re of patterns) {
     for (const match of source.matchAll(re)) {

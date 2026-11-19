@@ -104,7 +104,7 @@ flowchart LR
 | Config                  | `.env.example`, `.env.sample`, `.env.template`        | key names only, never values. Real `.env` files are never opened.                                                          |
 | Docs                    | `.md` `.mdx`                                          | relative links and `` `backticked` `` names                                                                                |
 
-Inside a git repository the file list comes from git, so `.gitignore` is honoured. Elsewhere, common output folders (`node_modules`, `dist`, `.venv`, …) are skipped. Files over 1 MiB are skipped.
+Inside a git repository the file list comes from git, so `.gitignore` is honoured and a committed `build/` or `vendor/` folder is indexed like any other source (`node_modules` never is). Elsewhere, common output folders (`node_modules`, `dist`, `.venv`, …) are skipped. Files over 1 MiB are skipped.
 
 ## Requirements
 
@@ -222,12 +222,13 @@ Each tool call first re-indexes changed files, so the answers match the working 
 ## Known limitations
 
 - **Calls are resolved by name through imports, not by type.** A method called on an instance (`const s = new Service(); s.run()`), a chained call (`a.b().c()`) and dynamic dispatch are not followed. Calls that cannot be resolved are left out instead of guessed, so the graph misses edges rather than inventing them.
-- **SQL detection is pattern-based.** It reads SQL text. Queries built by concatenation or by an ORM (Prisma, Drizzle, SQLAlchemy expressions) are not seen. Any `.from("name")` call is treated as a table read, which can be wrong for a library that is not a query builder.
+- **SQL detection is pattern-based.** It reads SQL text. Queries built by concatenation or by an ORM (Prisma, Drizzle, SQLAlchemy expressions) are not seen. A `.from("name")` call on an instance is treated as a table read, which can be wrong for a library that is not a query builder. A name defined as a CTE (`WITH recent AS (...)`) anywhere in a file is never counted as a table in that file, because code often defines a CTE in one string and reads it in another; a real table with the same name loses its reads from that file.
 - tsconfig `extends` is not followed, and `package.json` `exports` maps are not read; workspace packages are resolved to `src/index`, `index` or their `main` file.
 - A Python absolute import is matched from the repository root, then by a unique path suffix. Two packages with the same module path are left unresolved.
-- Docs are linked only through relative links and backticked names. A backticked common word that happens to be the only function of that name will be linked.
+- Docs are linked only through relative links and backticked names. A backticked common word that happens to be the only function of that name will be linked; this is the least reliable kind of edge (see the numbers below).
+- Env keys are matched in the source text, so a key named inside a string or a comment counts as a use.
 - Only top-level functions, classes and their methods are symbols. Nested functions are attributed to the function that contains them.
-- Verified on the bundled sample repository and on one 171-file TypeScript monorepo (indexed in under half a second, no unresolved imports). Larger and more varied repositories have not been tried yet.
+- **Measured accuracy is a sample, not a proof.** Ten public repositories were indexed (express, flask, httpx, got, swr, hono, datasette, full-stack-fastapi-template, umami, trpc: 4,903 files, about 54,000 relations; the largest, 1,741 files, took 1.6 s). 180 randomly drawn edges were checked by hand against the source: calls 40/40, imports 30/30, table edges 40/40, env edges 29/30, doc edges 38/40. Of roughly 12,000 local imports, 70 were left unresolved; 67 of those point at files that are not in the repository (generated clients, build output). This measures wrong edges only. Missing edges were not counted, and the first limitation above means there are many.
 - Developed on macOS; Linux should work, Windows is untested. Node's built-in SQLite is still marked experimental by Node; `atlas` hides its startup warning.
 
 ## Paid plans (planned)
