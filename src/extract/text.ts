@@ -31,14 +31,21 @@ function lineOf(source: string, offset: number): number {
   return line;
 }
 
-export function envUses(source: string, language: Language): EnvFact[] {
+/** Where each env key is first used, as an offset into `source`. */
+export function envMatches(source: string, language: Language): { name: string; offset: number }[] {
   const patterns = language === "python" ? pythonPatterns(source) : SCRIPT_ENV;
-  const found = new Map<string, EnvFact>();
+  const found: { name: string; offset: number }[] = [];
   for (const re of patterns) {
-    for (const match of source.matchAll(re)) {
-      const name = match[1];
-      if (name && !found.has(name)) found.set(name, { name, op: "use", line: lineOf(source, match.index) });
-    }
+    for (const match of source.matchAll(re)) if (match[1]) found.push({ name: match[1], offset: match.index });
+  }
+  return found.sort((a, b) => a.offset - b.offset);
+}
+
+/** Env keys used in `source`. `isCode` can veto a match by its offset, for example one inside a string or a comment. */
+export function envUses(source: string, language: Language, isCode: (offset: number) => boolean = () => true): EnvFact[] {
+  const found = new Map<string, EnvFact>();
+  for (const { name, offset } of envMatches(source, language)) {
+    if (!found.has(name) && isCode(offset)) found.set(name, { name, op: "use", line: lineOf(source, offset) });
   }
   return [...found.values()];
 }

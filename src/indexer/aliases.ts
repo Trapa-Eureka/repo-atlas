@@ -72,6 +72,24 @@ function withSlash(target: string): string {
   return target === "" || target.endsWith("/") ? target : `${target}/`;
 }
 
+/** `"some-name": "link:./src/api"` (or `file:`) in a package.json: a folder of this repository imported by a package name. */
+function linkedFolders(folder: string, manifest: Record<string, unknown>): PathAlias[] {
+  const aliases: PathAlias[] = [];
+  for (const key of ["dependencies", "devDependencies"]) {
+    const dependencies = manifest[key];
+    if (typeof dependencies !== "object" || dependencies === null) continue;
+    for (const [name, version] of Object.entries(dependencies)) {
+      const target = typeof version === "string" ? /^(?:link|file):(\.{1,2}\/.*|\.)$/.exec(version)?.[1] : undefined;
+      if (!target || /\.tgz$/.test(target)) continue;
+      const linked = underFolder(folder, target).replace(/\/$/, "");
+      if (linked.startsWith("..")) continue;
+      const under = (path: string) => (linked ? `${linked}/${path}` : path);
+      aliases.push({ scope: folder, prefix: name, exact: true, targets: [under("src/index"), under("index")] }, { scope: folder, prefix: `${name}/`, exact: false, targets: [under("src/"), under("")] });
+    }
+  }
+  return aliases;
+}
+
 function packageAliases(folder: string, manifest: Record<string, unknown>): PathAlias[] {
   const name = manifest.name;
   if (typeof name !== "string" || folder === "") return [];
@@ -93,7 +111,7 @@ export function loadAliases(root: string, configs: string[]): PathAlias[] {
     const json = readJson(join(root, path));
     if (!json) continue;
     const folder = posix.dirname(path) === "." ? "" : posix.dirname(path);
-    aliases.push(...(basename(path) === "package.json" ? packageAliases(folder, json) : tsconfigAliases(folder, json)));
+    aliases.push(...(basename(path) === "package.json" ? [...packageAliases(folder, json), ...linkedFolders(folder, json)] : tsconfigAliases(folder, json)));
   }
   return aliases;
 }

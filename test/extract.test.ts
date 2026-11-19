@@ -115,7 +115,7 @@ function hidden() { function inner() {} return process.env.API_KEY ?? process.en
       ["pkg", false, false, "*>ns"],
       ["./c.js", true, false, "passed>passed"],
       ["./d.js", true, true, ""],
-      ["./e.js", false, false, ""],
+      ["./e.js", false, false, "*>lazy"],
     ]);
     expect(facts.calls.map((call) => `${call.receiver ?? ""}.${call.callee}`)).toEqual(expect.arrayContaining(["this.stop", ".one", "ns.help", ".Other", "db.query"]));
     expect(facts.tables.map((table) => `${table.op}:${table.name}`).sort()).toEqual(["read:profiles", "write:jobs"]);

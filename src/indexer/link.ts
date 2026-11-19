@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import type { FileFacts, ImportFact, SymbolFact } from "../extract/index.js";
+import type { FileFacts, ImportFact, LocalFact, SymbolFact } from "../extract/index.js";
 import { envId, fileId, moduleId, symbolId, tableId, type EdgeKind, type GraphEdge, type GraphNode } from "../graph/types.js";
 
 /** One `paths` entry of a tsconfig, or a workspace package, both reduced to "prefix → folders to try". */
@@ -32,6 +32,7 @@ export interface LinkResult {
 const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 const COMPILED_TO_SOURCE: Record<string, string[]> = { ".js": [".ts", ".tsx"], ".jsx": [".tsx"], ".mjs": [".mts"], ".cjs": [".cts"] };
 const MAX_REEXPORT_HOPS = 4;
+const MAX_INHERITANCE_DEPTH = 5;
 
 interface Binding {
   file: string;
@@ -76,6 +77,9 @@ class Linker {
   private readonly resolvedImports = new Map<string, Map<ImportFact, string>>();
   private readonly pythonSuffixCache = new Map<string, string | null>();
   private readonly submodules = new Map<string, Map<string, string>>();
+  private readonly bindingCache = new Map<string, Map<string, Binding>>();
+  /** Class symbol id → where it is declared, to follow `extends`. */
+  private readonly classes = new Map<string, { facts: FileFacts; symbol: SymbolFact }>();
   private readonly aliases: PathAlias[];
 
   private readonly files: FileFacts[];
@@ -86,6 +90,7 @@ class Linker {
     for (const facts of this.files) {
       this.byPath.set(facts.path, facts);
       this.symbols.set(facts.path, new Map(facts.symbols.map((symbol) => [symbol.name, symbol])));
+      for (const symbol of facts.symbols) if (symbol.kind === "class") this.classes.set(symbolId(facts.path, symbol.name), { facts, symbol });
     }
   }
 
@@ -223,7 +228,10 @@ class Linker {
   // ---------- calls ----------
 
   private bindings(facts: FileFacts): Map<string, Binding> {
+    const cached = this.bindingCache.get(facts.path);
+    if (cached) return cached;
     const bindings = new Map<string, Binding>();
+    this.bindingCache.set(facts.path, bindings);
     const resolved = this.resolvedImports.get(facts.path);
     for (const fact of facts.imports) {
       if (fact.reexport) continue;
@@ -241,6 +249,10 @@ class Linker {
     if (symbol) return symbolId(path, symbol.name);
     if (hops >= MAX_REEXPORT_HOPS) return null;
     const facts = this.byPath.get(path);
+    // `export { a as b }`, `export default a`, `module.exports = a`: the name stands for a local one.
+    const alias = facts?.exports.find((candidate) => candidate.exported === name);
+    const aliased = facts && alias ? this.resolveName(facts, alias.local, hops + 1) : null;
+    if (aliased) return aliased;
     const resolved = this.resolvedImports.get(path);
     for (const fact of facts?.imports ?? []) {
       if (!fact.reexport) continue;
@@ -251,6 +263,58 @@ class Linker {
       if (found) return found;
     }
     return null;
+  }
+
+  /** A top-level name as written in this file: one of its symbols, or what it imported under that name. */
+  private resolveName(facts: FileFacts, name: string, hops = 0): string | null {
+    if (this.symbols.get(facts.path)?.has(name)) return symbolId(facts.path, name);
+    const binding = this.bindings(facts).get(name);
+    if (!binding || binding.imported === "*") return null;
+    return this.findExport(binding.file, binding.imported === "=" ? "default" : binding.imported, hops);
+  }
+
+  /** What `name` is at `line`, when the file says so itself: the latest declaration still in scope. */
+  private local(facts: FileFacts, name: string, line: number, column?: number): LocalFact | null {
+    let best: LocalFact | null = null;
+    for (const local of facts.locals) {
+      if (local.name !== name || line < local.line || line > local.endLine) continue;
+      // On the line where the scope opens, only what comes after its start is inside it.
+      if (line === local.line && column !== undefined && local.column !== undefined && column < local.column) continue;
+      if (!best || local.line > best.line || (local.line === best.line && local.endLine < best.endLine)) best = local;
+    }
+    return best;
+  }
+
+  /** A method of a class, looked up through the classes it extends. */
+  private memberOf(classId: string, name: string, depth = 0): string | null {
+    const member = `${classId}.${name}`;
+    if (this.nodes.has(member)) return member;
+    const declared = this.classes.get(classId);
+    if (!declared?.symbol.extends || depth >= MAX_INHERITANCE_DEPTH) return null;
+    const parent = this.resolveName(declared.facts, declared.symbol.extends);
+    return parent && parent !== classId ? this.memberOf(parent, name, depth + 1) : null;
+  }
+
+  private instanceMember(facts: FileFacts, local: LocalFact, name: string): string | null {
+    const owner = local.type ? this.resolveName(facts, local.type) : null;
+    return owner ? this.memberOf(owner, name) : null;
+  }
+
+  /** `object.property`, where `object` is a name in this file: a typed local, a symbol, or an import. */
+  private resolveMember(facts: FileFacts, object: string, property: string, line: number, column?: number): string | null {
+    const local = this.local(facts, object, line, column);
+    if (local?.kind === "instance") return this.instanceMember(facts, local, property);
+    if (local) return null;
+    if (this.symbols.get(facts.path)?.has(object)) return this.memberOf(symbolId(facts.path, object), property);
+    const binding = this.bindings(facts).get(object);
+    if (!binding) return null;
+    if (binding.imported === "*") return this.findExport(binding.file, property);
+    // What `require()` returned: its named exports, or the members of the one value it exports.
+    const named = binding.imported === "=" ? this.findExport(binding.file, property) : null;
+    if (named) return named;
+    const exported = binding.imported === "=" ? "default" : binding.imported;
+    const owner = this.findExport(binding.file, exported);
+    return (owner ? this.memberOf(owner, property) : null) ?? (exported === "default" ? this.findExport(binding.file, `default.${property}`) : null);
   }
 
   private enclosing(facts: FileFacts, line: number): SymbolFact | null {
@@ -264,29 +328,28 @@ class Linker {
 
   private addCalls(facts: FileFacts): void {
     if (facts.calls.length === 0) return;
-    const own = this.symbols.get(facts.path) ?? new Map<string, SymbolFact>();
-    const bindings = this.bindings(facts);
-
     for (const call of facts.calls) {
       const caller = this.enclosing(facts, call.line);
       let target: string | null = null;
 
+      const classId = caller?.name.includes(".") ? symbolId(facts.path, caller.name.split(".")[0] ?? "") : null;
       if (call.receiver === null) {
-        const binding = bindings.get(call.callee);
-        if (own.has(call.callee)) target = symbolId(facts.path, call.callee);
-        else if (binding && binding.imported !== "*") target = this.findExport(binding.file, binding.imported);
+        // `const { parse } = db; parse()` is a call of `db.parse`.
+        // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.
+        const local = this.local(facts, call.callee, call.line, call.column);
+        if (!local) target = this.resolveName(facts, call.callee);
+        else if (local.kind === "member" && local.object && local.property) target = this.resolveMember(facts, local.object, local.property, local.line, local.column);
       } else if (call.receiver === "this" || call.receiver === "self" || call.receiver === "cls") {
-        const className = caller?.name.includes(".") ? caller.name.split(".")[0] : null;
-        if (className && own.has(`${className}.${call.callee}`)) target = symbolId(facts.path, `${className}.${call.callee}`);
+        if (classId) target = this.memberOf(classId, call.callee);
+      } else if (call.receiver === "super") {
+        const declared = classId ? this.classes.get(classId) : undefined;
+        const parent = declared?.symbol.extends ? this.resolveName(declared.facts, declared.symbol.extends) : null;
+        if (parent) target = this.memberOf(parent, call.callee);
+      } else if (call.receiver.startsWith("this.")) {
+        const field = this.local(facts, call.receiver, call.line, call.column);
+        if (field?.kind === "instance") target = this.instanceMember(facts, field, call.callee);
       } else {
-        const binding = bindings.get(call.receiver);
-        if (own.has(`${call.receiver}.${call.callee}`)) target = symbolId(facts.path, `${call.receiver}.${call.callee}`);
-        else if (binding?.imported === "*") target = this.findExport(binding.file, call.callee);
-        else if (binding) {
-          const owner = this.findExport(binding.file, binding.imported);
-          const member = owner ? `${owner}.${call.callee}` : null;
-          if (member && this.nodes.has(member)) target = member;
-        }
+        target = this.resolveMember(facts, call.receiver, call.callee, call.line, call.column);
       }
 
       if (!target) continue;

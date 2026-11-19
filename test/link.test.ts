@@ -132,8 +132,19 @@ const arbitraryFile = fc.record({
   name: fc.constantFrom(...NAMES),
   language: fc.constantFrom("typescript" as const, "python" as const, "markdown" as const, "sql" as const),
   symbols: fc.uniqueArray(fc.constantFrom("run", "stop", "Box", "Box.open", "load"), { maxLength: 4 }),
-  imports: fc.array(fc.record({ specifier: fc.constantFrom("./a", "./b.js", "../c", "./lib", ".", "..d", "src.a", "react", "@x/y", "./nope", "../../.."), name: fc.constantFrom("run", "stop", "Box", "default", "*"), reexport: fc.boolean(), star: fc.boolean() }), { maxLength: 4 }),
-  calls: fc.array(fc.record({ callee: fc.constantFrom("run", "stop", "open", "load", "Box"), receiver: fc.constantFrom(null, "this", "self", "Box", "run"), line: fc.integer({ min: 1, max: 40 }) }), { maxLength: 5 }),
+  imports: fc.array(fc.record({ specifier: fc.constantFrom("./a", "./b.js", "../c", "./lib", ".", "..d", "src.a", "react", "@x/y", "./nope", "../../.."), name: fc.constantFrom("run", "stop", "Box", "default", "*", "="), reexport: fc.boolean(), star: fc.boolean() }), { maxLength: 4 }),
+  calls: fc.array(fc.record({ callee: fc.constantFrom("run", "stop", "open", "load", "Box"), receiver: fc.constantFrom(null, "this", "self", "super", "this.box", "Box", "run", "box"), line: fc.integer({ min: 1, max: 40 }) }), { maxLength: 5 }),
+  exports: fc.array(fc.record({ exported: fc.constantFrom("run", "default", "default.open", "Box"), local: fc.constantFrom("run", "stop", "Box", "load") }), { maxLength: 3 }),
+  locals: fc.array(
+    fc.record({
+      name: fc.constantFrom("box", "run", "this.box", "load"),
+      kind: fc.constantFrom("member" as const, "instance" as const, "other" as const),
+      line: fc.integer({ min: 1, max: 30 }),
+      length: fc.integer({ min: 0, max: 30 }),
+    }),
+    { maxLength: 4 },
+  ),
+  parent: fc.constantFrom(undefined, "Box", "run", "stop"),
   tables: fc.array(fc.record({ name: fc.constantFrom("users", "orders"), op: fc.constantFrom("define" as const, "read" as const, "write" as const) }), { maxLength: 3 }),
   docRefs: fc.array(fc.constantFrom("a.ts", "./b.py", "run()", "users", "Box.open", "../src/a.ts", "/"), { maxLength: 4 }),
 });
@@ -143,8 +154,18 @@ const arbitraryFacts = fc.uniqueArray(arbitraryFile, { maxLength: 8, selector: (
     const extension = { typescript: "ts", python: "py", markdown: "md", sql: "sql" }[file.language];
     return {
       ...emptyFacts(`${file.folder}${file.name}.${extension}`, file.language),
-      symbols: file.symbols.map((name, index) => ({ name, kind: name.includes(".") ? "method" : "function", line: index * 10 + 1, endLine: index * 10 + 9, exported: true, isDefault: index === 0 })),
-      imports: file.imports.map((item, index) => ({ specifier: item.specifier, names: [{ imported: item.name, local: item.name === "*" || item.name === "default" ? "run" : item.name }], reexport: item.reexport, star: item.star, line: index + 1 })),
+      symbols: file.symbols.map((name, index) => ({
+        name,
+        kind: name.includes(".") ? "method" : name === "Box" ? "class" : "function",
+        line: index * 10 + 1,
+        endLine: index * 10 + 9,
+        exported: true,
+        isDefault: index === 0,
+        ...(name === "Box" && file.parent ? { extends: file.parent } : {}),
+      })),
+      exports: file.exports,
+      locals: file.locals.map((local) => ({ name: local.name, kind: local.kind, object: "run", property: "open", type: "Box", line: local.line, endLine: local.line + local.length })),
+      imports: file.imports.map((item, index) => ({ specifier: item.specifier, names: [{ imported: item.name, local: item.name === "*" || item.name === "default" || item.name === "=" ? "run" : item.name }], reexport: item.reexport, star: item.star, line: index + 1 })),
       calls: file.calls,
       tables: file.tables.map((table, index) => ({ ...table, line: index + 1 })),
       docRefs: file.docRefs.map((target, index) => ({ target, kind: "code", line: index + 1 })),

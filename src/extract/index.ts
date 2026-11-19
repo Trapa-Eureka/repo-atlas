@@ -1,14 +1,15 @@
 import { basename, extname } from "node:path";
+import type { Node } from "web-tree-sitter";
 import { extractPython, extractScript } from "./code.js";
 import { emptyFacts, type FileFacts, type Language, type TableFact } from "./facts.js";
 import { parserFor, type Grammar } from "./parser.js";
 import { cteNamesIn, tablesInSql } from "./sql.js";
 import { envDeclarations, envUses, markdownRefs } from "./text.js";
 
-export type { CallFact, DocRefFact, EnvFact, FileFacts, ImportFact, ImportedName, Language, SymbolFact, TableFact } from "./facts.js";
+export type { CallFact, DocRefFact, EnvFact, ExportFact, FileFacts, ImportFact, ImportedName, Language, LocalFact, SymbolFact, TableFact } from "./facts.js";
 
 /** Bump when extraction output changes, so existing indexes re-parse every file. */
-export const EXTRACTOR_VERSION = 2;
+export const EXTRACTOR_VERSION = 3;
 
 const BY_EXTENSION: Record<string, Language> = {
   ".ts": "typescript",
@@ -44,6 +45,18 @@ function dedupeTables(tables: TableFact[]): TableFact[] {
   return [...seen.values()];
 }
 
+const TEXT_NODES = new Set(["comment", "string", "template_string", "string_fragment", "string_content", "regex"]);
+const CODE_INSIDE_TEXT = new Set(["template_substitution", "interpolation"]);
+
+/** Whether the source at `offset` is code, as opposed to the inside of a string or a comment. */
+function isCode(root: Node, offset: number): boolean {
+  for (let node: Node | null = root.descendantForIndex(offset); node; node = node.parent) {
+    if (CODE_INSIDE_TEXT.has(node.type)) return true;
+    if (TEXT_NODES.has(node.type)) return false;
+  }
+  return true;
+}
+
 async function extractCode(source: string, facts: FileFacts, grammar: Grammar): Promise<void> {
   const parser = await parserFor(grammar);
   const tree = parser.parse(source);
@@ -51,10 +64,11 @@ async function extractCode(source: string, facts: FileFacts, grammar: Grammar): 
   try {
     if (grammar === "python") extractPython(tree.rootNode, facts);
     else extractScript(tree.rootNode, facts);
+    // `process.env.X` in a test title or a comment is a mention, not a use.
+    facts.envs = envUses(source, facts.language, (offset) => isCode(tree.rootNode, offset));
   } finally {
     tree.delete();
   }
-  facts.envs = envUses(source, facts.language);
   facts.tables = dedupeTables(facts.tables);
 }
 

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { loadAliases } from "../src/indexer/aliases.js";
 import { walk } from "../src/indexer/walk.js";
 
 const FILES = ["src/a.ts", "build/plugin.ts", "vendor/lib.js", "dist/a.js", ".venv/site.py", "node_modules/pkg/index.js", "ignored/x.ts"];
@@ -32,5 +33,22 @@ describe("walk", () => {
 
   it("skips well-known output folders outside git", () => {
     expect(walk(create(false)).files.map((file) => file.path)).toEqual(["ignored/x.ts", "src/a.ts"]);
+  });
+});
+
+describe("loadAliases", () => {
+  it("maps a link: dependency to the folder it points at, for the package that declares it", () => {
+    root = mkdtempSync(join(tmpdir(), "atlas-alias-"));
+    mkdirSync(join(root, "apps/web"), { recursive: true });
+    writeFileSync(join(root, "apps/web/package.json"), JSON.stringify({ name: "web", dependencies: { api: "link:./src/api", shared: "file:../../packages/shared", up: "file:../..", react: "^19.0.0", packed: "file:./vendor/packed.tgz", outside: "link:../../../outside" } }));
+    const aliases = loadAliases(root, ["apps/web/package.json"]).filter((alias) => alias.scope === "apps/web");
+    expect(aliases.map((alias) => `${alias.prefix} -> ${alias.targets.join(", ")}`)).toEqual([
+      "api -> apps/web/src/api/src/index, apps/web/src/api/index",
+      "api/ -> apps/web/src/api/src/, apps/web/src/api/",
+      "shared -> packages/shared/src/index, packages/shared/index",
+      "shared/ -> packages/shared/src/, packages/shared/",
+      "up -> src/index, index",
+      "up/ -> src/, ",
+    ]);
   });
 });
