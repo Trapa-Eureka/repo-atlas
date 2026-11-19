@@ -1,6 +1,6 @@
 {
   "name": "repo-atlas-cli",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Local codebase knowledge graph CLI: maps how code, SQL tables, config and docs relate, for humans and AI coding agents",
   "license": "MIT",
   "type": "module",
