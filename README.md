@@ -273,6 +273,7 @@ repo-atlas/
 ├── test/          # extractor, linker (property-based), CLI and MCP tests
 ├── fixtures/shop/ # sample repository indexed by the tests
 ├── assets/        # README screenshots and the social preview image
+├── scripts/       # regenerate the images in assets/ (`pnpm screenshots`)
 ├── .claude/
 │   ├── settings.json
 │   ├── hooks/     # dev-time hooks and their tests

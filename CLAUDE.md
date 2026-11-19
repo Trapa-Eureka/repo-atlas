@@ -17,4 +17,4 @@ Product background: item #3 of the GitHub_Trending_Tech_Project_TOP100 PDF in th
 - `docs/` is not tracked by git. It holds private planning notes, including the paid plans, which are not built. The README may say paid plans are planned and nothing more.
 - Publishing to npm is done by a human. The hook and the deny rule block it on purpose.
 - All tracked files are written in English. The one exception is `README.ko.md`, a requested Korean translation: `README.md` stays the source of truth, so change both together.
-- The pictures in `assets/` are captures of real CLI output on `fixtures/shop`. When that output changes, re-capture them instead of editing the README text around them.
+- The pictures in `assets/` are captures of real CLI output on `fixtures/shop`. When that output changes, re-capture them with `pnpm screenshots` (needs Chrome) instead of editing the README text around them.

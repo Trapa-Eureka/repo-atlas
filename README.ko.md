@@ -275,6 +275,7 @@ repo-atlas/
 ├── test/          # 추출기, 링커(속성 기반), CLI, MCP 테스트
 ├── fixtures/shop/ # 테스트가 인덱싱하는 샘플 저장소
 ├── assets/        # README 스크린샷과 소셜 프리뷰 이미지
+├── scripts/       # assets/ 이미지를 다시 만드는 스크립트 (`pnpm screenshots`)
 ├── .claude/
 │   ├── settings.json
 │   ├── hooks/     # 개발용 훅과 테스트

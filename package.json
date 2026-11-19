@@ -31,6 +31,10 @@
     "type": "git",
     "url": "git+https://github.com/Trapa-Eureka/repo-atlas.git"
   },
+  "homepage": "https://github.com/Trapa-Eureka/repo-atlas#readme",
+  "bugs": {
+    "url": "https://github.com/Trapa-Eureka/repo-atlas/issues"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -38,7 +42,8 @@
     "test": "vitest run",
     "test:hooks": "node --test .claude/hooks/*.test.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:hooks",
-    "atlas": "node dist/cli/main.js"
+    "atlas": "node dist/cli/main.js",
+    "screenshots": "pnpm build && node scripts/screenshots.mjs && node scripts/social-preview.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
