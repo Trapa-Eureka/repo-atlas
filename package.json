@@ -1,0 +1,58 @@
+{
+  "name": "repo-atlas",
+  "version": "0.1.0",
+  "description": "Local codebase knowledge graph CLI: maps how code, SQL tables, config and docs relate, for humans and AI coding agents",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.30.1",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "atlas": "dist/cli/main.js",
+    "repo-atlas": "dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "knowledge-graph",
+    "codebase",
+    "cli",
+    "mcp",
+    "tree-sitter",
+    "ai-agents",
+    "impact-analysis",
+    "mermaid"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Trapa-Eureka/repo-atlas.git"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:hooks": "node --test .claude/hooks/*.test.mjs",
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:hooks",
+    "atlas": "node dist/cli/main.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "commander": "^15.1.0",
+    "web-tree-sitter": "^0.27.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "eslint": "^10.15.0",
+    "fast-check": "^4.10.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vitest": "^5.1.1"
+  }
+}

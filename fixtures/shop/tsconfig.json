@@ -1,0 +1,9 @@
+{
+  // Path alias used by the web folder.
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+    },
+  },
+}

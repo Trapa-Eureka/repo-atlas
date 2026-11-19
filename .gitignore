@@ -1,0 +1,93 @@
+# ==========================================================
+# repo-atlas .gitignore
+# Principle: commit code only. Never commit indexes, secrets, private notes or build output.
+# ==========================================================
+
+# ---------- [1] Product data ----------
+# The index `atlas` builds. It mirrors file paths and symbol names of whatever was indexed.
+.atlas/
+**/.atlas/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---------- [2] Private notes ----------
+# Planning notes, including the paid plans that are not built. Kept on the author's machine only.
+/docs/
+
+# ---------- [3] Secrets / credentials ----------
+.env
+.env.*
+!.env.example
+!.env.sample
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+.npmrc
+.netrc
+secrets/
+**/secrets/
+credentials.json
+
+# ---------- [4] Node / pnpm ----------
+node_modules/
+**/node_modules/
+.pnpm-store/
+npm-debug.log*
+.pnpm-debug.log*
+*.tgz
+.eslintcache
+# The lockfile is committed (pnpm-lock.yaml). Ignore other package managers' locks.
+package-lock.json
+yarn.lock
+bun.lockb
+
+# ---------- [5] Build / test output ----------
+dist/
+coverage/
+*.tsbuildinfo
+.vitest/
+
+# ---------- [6] Agent workspaces ----------
+# Shared settings (.claude/settings.json, hooks, skills, agents) ARE committed.
+.claude/settings.local.json
+.claude/*.local.*
+.claude/projects/
+.claude/todos/
+CLAUDE.local.md
+.mcp.json
+.codex/
+.cursor/
+.worktrees/
+scratch/
+tmp/
+*.tmp
+*.bak
+*.orig
+*.swp
+
+# ---------- [7] Logs / OS / editors ----------
+logs/
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ---------- [8] Source planning documents / large binaries ----------
+GitHub_Trending_*.pdf
+GitHub_Trending_*.docx
+*.pdf
+*.docx
+*.zip
+*.tar.gz
