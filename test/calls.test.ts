@@ -296,6 +296,45 @@ describe("Go", () => {
     expect(await edgesOf("reads_table", files, module)).toEqual(["billing/store.go -> table:invoices"]);
     expect(await edgesOf("uses_env", files, module)).toEqual(["cmd/main.go -> env:REGION"]);
   });
+
+  it("follows a method on what a call returns: a variable made by a call, and a call made on a call", async () => {
+    const store =
+      "package store\n\ntype Store struct{}\n\ntype Row struct{}\n\ntype Reader interface {\n\tRead()\n}\n\nfunc Open(path string) (*Store, error) {\n\treturn &Store{}, nil\n}\n\nfunc Anything() interface{} {\n\treturn nil\n}\n\nfunc Rows() []*Row {\n\treturn nil\n}\n\nfunc (s *Store) First() *Row {\n\treturn &Row{}\n}\n\nfunc (s *Store) Last() *Row {\n\treturn &Row{}\n}\n\nfunc (s *Store) Close() {}\n\nfunc (r *Row) Name() string {\n\treturn \"\"\n}\n\nfunc (r *Row) Size() int {\n\treturn 0\n}\n";
+    const main = (body: string) => `package main\n\nimport "example.com/shop/store"\n\ntype Store struct{}\n\nfunc (s *Store) First() {}\n\nfunc other() *int {\n\treturn nil\n}\n\nfunc main() {\n${body}}\n`;
+    const from = async (body: string) => (await edgesOf("calls", { "store/store.go": store, "cmd/main.go": main(body) }, module)).map((edge) => edge.replace("cmd/main.go#main -> ", ""));
+
+    // A variable made by a call, also the first of two; the type is the one of the file that declares the function, not the caller's `Store`.
+    expect(await from('\tdb, err := store.Open("x")\n\t_ = err\n\tdb.Close()\n')).toEqual(["store/store.go#Open", "store/store.go#Store.Close"]);
+    expect(await from('\tvar db, _ = store.Open("x")\n\trow := db.Last()\n\trow.Size()\n')).toEqual(["store/store.go#Open", "store/store.go#Row.Size", "store/store.go#Store.Last"]);
+    // A call made on a call.
+    expect(await from('\tdb, _ := store.Open("x")\n\tdb.First().Name()\n')).toEqual(["store/store.go#Open", "store/store.go#Row.Name", "store/store.go#Store.First"]);
+    // Nothing when what is returned is not one type of the repository, or when a nearer declaration hides the name.
+    expect(await from("\tunknown := store.Anything()\n\tunknown.Close()\n\trows := store.Rows()\n\trows.Name()\n")).toEqual(["store/store.go#Anything", "store/store.go#Rows"]);
+    expect(await from('\tdb, _ := store.Open("x")\n\tif db := other(); db != nil {\n\t\tdb.Close()\n\t}\n')).toEqual(["cmd/main.go#other", "store/store.go#Open"]);
+    expect(await from('\tdb, _ := store.Open("x")\n\tswitch db := v.(type) {\n\tcase int:\n\t\tdb.Close()\n\t}\n\tselect {\n\tcase db := <-ch:\n\t\tdb.Close()\n\t}\n')).toEqual(["store/store.go#Open"]);
+  });
+
+  it("does not take a type parameter for a type of the package", async () => {
+    expect(
+      await edgesOf("calls", {
+        "lib/lib.go":
+          "package lib\n\ntype Key struct{}\n\ntype Node struct{}\n\nfunc (k *Key) Hash() {}\n\nfunc (n *Node) Walk() {}\n\ntype Cache[Key comparable] struct{}\n\nfunc (c *Cache[Key]) Lookup() Key {\n\tvar k Key\n\treturn k\n}\n\nfunc NewCache() *Cache[string] {\n\treturn nil\n}\n\nfunc First[Node any](xs []Node) Node {\n\treturn xs[0]\n}\n\nfunc use(xs []int) {\n\tc := NewCache()\n\tk := c.Lookup()\n\tk.Hash()\n\tn := First(xs)\n\tn.Walk()\n}\n",
+      }),
+    ).toEqual(["lib/lib.go#use -> lib/lib.go#Cache.Lookup", "lib/lib.go#use -> lib/lib.go#First", "lib/lib.go#use -> lib/lib.go#NewCache"]);
+  });
+
+  it("reads the right side of a declaration before the name it declares", async () => {
+    expect(
+      await edgesOf(
+        "calls",
+        {
+          "view/view.go": "package view\n\ntype View struct{}\n\nfunc New() *View {\n\treturn &View{}\n}\n\nfunc (v *View) Render() {}\n",
+          "ui/page.go": 'package ui\n\nimport "example.com/shop/view"\n\nfunc show() {\n\tview := view.New()\n\tview.Render()\n}\n',
+        },
+        module,
+      ),
+    ).toEqual(["ui/page.go#show -> view/view.go#New", "ui/page.go#show -> view/view.go#View.Render"]);
+  });
 });
 
 describe("Java", () => {

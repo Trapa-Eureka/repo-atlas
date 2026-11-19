@@ -7,10 +7,10 @@ import { cteNamesIn, tablesInSql } from "./sql.js";
 import { envDeclarations, envUses, markdownRefs } from "./text.js";
 
 export { rubyUnderscore } from "./code.js";
-export type { CallFact, DocRefFact, EnvFact, ExportFact, FileFacts, ImportFact, ImportedName, Language, LocalFact, SymbolFact, TableFact } from "./facts.js";
+export type { CallFact, CallRef, DocRefFact, EnvFact, ExportFact, FileFacts, ImportFact, ImportedName, Language, LocalFact, SymbolFact, TableFact } from "./facts.js";
 
 /** Bump when extraction output changes, so existing indexes re-parse every file. */
-export const EXTRACTOR_VERSION = 7;
+export const EXTRACTOR_VERSION = 8;
 
 const BY_EXTENSION: Record<string, Language> = {
   ".ts": "typescript",

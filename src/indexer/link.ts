@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { rubyUnderscore, type FileFacts, type ImportFact, type LocalFact, type SymbolFact } from "../extract/index.js";
+import { rubyUnderscore, type CallRef, type FileFacts, type ImportFact, type LocalFact, type SymbolFact } from "../extract/index.js";
 import { envId, fileId, moduleId, symbolId, tableId, type EdgeKind, type GraphEdge, type GraphNode } from "../graph/types.js";
 
 /** One `paths` entry of a tsconfig, or a workspace package, both reduced to "prefix → folders to try". */
@@ -372,10 +372,28 @@ class Linker {
     return null;
   }
 
-  private goCall(facts: FileFacts, call: FileFacts["calls"][number]): string | null {
-    const [receiver, field] = call.receiver?.split(".") ?? [];
+  /** What a Go call returns, when the function it calls says so: the first result type, in the terms of the file that declares the function. */
+  private goReturned(facts: FileFacts, call: CallRef, depth: number): GoType | null {
+    const id = depth < MAX_INHERITANCE_DEPTH ? this.goCall(facts, call, depth + 1) : null;
+    const path = id ? id.slice(4, id.indexOf("#")) : null;
+    const declaring = path ? this.byPath.get(path) : undefined;
+    const returns = id && path ? this.symbols.get(path)?.get(id.slice(id.indexOf("#") + 1))?.returns : undefined;
+    return declaring && returns ? this.goType(declaring, returns) : null;
+  }
+
+  /** The type of a Go local: the one written for it, or the one returned by the call it was made from. */
+  private goLocalType(facts: FileFacts, local: LocalFact, depth: number): GoType | null {
+    if (local.kind !== "instance") return null;
+    if (local.type) return this.goType(facts, local.type);
+    return local.from ? this.goReturned(facts, local.from, depth) : null;
+  }
+
+  private goCall(facts: FileFacts, call: CallRef, depth = 0): string | null {
     // `ID(x)` and `pkg.ID(x)` on a type are conversions, not calls.
     const callable = (id: string | null) => (id && this.nodes.get(id)?.detail !== "class" ? id : null);
+    // `a.Open().Read()`: a method of whatever the inner call returns.
+    if (call.receiver === "()") return call.via ? this.goMethod(this.goReturned(facts, call.via, depth), call.callee) : null;
+    const [receiver, field] = call.receiver?.split(".") ?? [];
     if (!receiver) return this.local(facts, call.callee, call.line, call.column) ? null : callable(this.goSymbol(folderOf(facts.path), call.callee, facts));
     const local = this.local(facts, receiver, call.line, call.column);
     if (!local) {
@@ -383,7 +401,7 @@ class Linker {
       const folder = field === undefined ? this.goPackages.get(facts.path)?.get(receiver) : undefined;
       return folder !== undefined && /^[A-Z]/.test(call.callee) ? callable(this.goSymbol(folder, call.callee, null)) : null;
     }
-    const type = local.kind === "instance" && local.type ? this.goType(facts, local.type) : null;
+    const type = this.goLocalType(facts, local, depth);
     if (field === undefined) return this.goMethod(type, call.callee);
     // `s.store.Load()`: the type of the field is written in the struct, in the terms of the file that declares it.
     const declared = type ? this.goDeclaration(type) : null;

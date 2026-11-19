@@ -1,5 +1,5 @@
 import type { Node } from "web-tree-sitter";
-import type { FileFacts, ImportFact, ImportedName, SymbolFact } from "./facts.js";
+import type { CallRef, FileFacts, ImportFact, ImportedName, SymbolFact } from "./facts.js";
 import { looksLikeSql, tablesInSql } from "./sql.js";
 
 const line = (node: Node): number => node.startPosition.row + 1;
@@ -542,6 +542,38 @@ function goPackageName(path: string): string {
   return (segments[segments.length - 1] ?? path).replace(/\.v\d+$/, "");
 }
 
+/**
+ * The first type a function returns: `T` in `T`, `*T`, `(T, error)`. A name that is one of the
+ * function's own type parameters, or one the receiver is written with (`func (c *Cache[Key]) Get() Key`),
+ * is not a type of the package.
+ */
+function goReturns(declaration: Node): string | null {
+  const result = declaration.childForFieldName("result");
+  const returned = result?.type === "parameter_list" ? goTypeName(namedChildren(result)[0]?.childForFieldName("type")) : goTypeName(result);
+  if (!returned) return null;
+  const receiver = declaration.childForFieldName("receiver");
+  const parameters = [...(declaration.childForFieldName("type_parameters")?.descendantsOfType("type_parameter_declaration") ?? []), ...(receiver?.descendantsOfType("type_arguments") ?? [])];
+  const names = parameters.flatMap((parameter) => (parameter ? parameter.descendantsOfType(["identifier", "type_identifier"]) : [])).map((name) => name?.text);
+  return names.includes(returned) ? null : returned;
+}
+
+/** A call written simply enough to say what is called: `f()`, `x.f()`, `x.y.f()`, and any of those on the result of another such call. */
+function goCallRef(node: Node | null | undefined, depth = 0): CallRef | null {
+  if (node?.type !== "call_expression" || depth > 4) return null;
+  const callee = node.childForFieldName("function");
+  const at = { line: line(node), column: column(node) };
+  if (callee?.type === "identifier") return { callee: callee.text, receiver: null, ...at };
+  if (callee?.type !== "selector_expression") return null;
+  const operand = callee.childForFieldName("operand");
+  const field = callee.childForFieldName("field");
+  if (!field || !operand) return null;
+  if (operand.type === "identifier" || (operand.type === "selector_expression" && operand.childForFieldName("operand")?.type === "identifier")) {
+    return { callee: field.text, receiver: operand.text, ...at };
+  }
+  const via = goCallRef(operand, depth + 1);
+  return via ? { callee: field.text, receiver: "()", ...at, via } : null;
+}
+
 function goParameters(list: Node | null, owner: Node, facts: FileFacts): void {
   for (const parameter of list ? namedChildren(list) : []) {
     const type = parameter.type === "parameter_declaration" ? goTypeName(parameter.childForFieldName("type")) : null;
@@ -561,9 +593,14 @@ function goDeclared(names: Node[], type: string | null, values: Node[], at: Node
   const inHeader = holder && holder.type !== "statement_list" && holder.type !== "block" && holder.type !== "var_declaration" && holder.type !== "var_spec_list";
   names.forEach((name, index) => {
     if (name.type !== "identifier" || name.text === "_") return;
-    const range = { line: line(at), endLine: inHeader ? endLine(holder) : scope.scopeEnd, column: column(at) };
-    const known = type ?? (values.length === names.length ? goConstructedType(values[index]) : null);
+    // The name means this from the end of the declaration on: in `view := view.New()` the right side still reads the package.
+    const range = { line: endLine(at), endLine: Math.max(endLine(at), inHeader ? endLine(holder) : scope.scopeEnd), column: at.endPosition.column };
+    const value = values.length === names.length ? values[index] : index === 0 && values.length === 1 ? values[0] : undefined;
+    const known = type ?? (values.length === names.length ? goConstructedType(value) : null);
+    // `x := New()`, `x, err := Open()`: what the name holds is the first thing the call returns.
+    const from = known ? null : goCallRef(value);
     if (known) facts.locals.push({ name: name.text, kind: "instance", type: known, ...range });
+    else if (from) facts.locals.push({ name: name.text, kind: "instance", from, ...range });
     else facts.locals.push({ name: name.text, kind: "other", ...range });
   });
 }
@@ -599,7 +636,8 @@ function walkGo(node: Node, facts: FileFacts, scope: GoScope): void {
     }
     case "function_declaration": {
       const name = node.childForFieldName("name")?.text;
-      if (name) addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: /^[A-Z]/.test(name), isDefault: false });
+      const returns = goReturns(node);
+      if (name) addSymbol(facts, { name, kind: "function", line: line(node), endLine: endLine(node), exported: /^[A-Z]/.test(name), isDefault: false, ...(returns ? { returns } : {}) });
       goParameters(node.childForFieldName("parameters"), node, facts);
       goParameters(node.childForFieldName("result"), node, facts);
       break;
@@ -608,7 +646,8 @@ function walkGo(node: Node, facts: FileFacts, scope: GoScope): void {
       const name = node.childForFieldName("name")?.text;
       const receiver = node.childForFieldName("receiver");
       const owner = goTypeName(receiver ? namedChildren(receiver)[0]?.childForFieldName("type") : null);
-      if (name && owner) addSymbol(facts, { name: `${owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: /^[A-Z]/.test(name), isDefault: false });
+      const returns = goReturns(node);
+      if (name && owner) addSymbol(facts, { name: `${owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: /^[A-Z]/.test(name), isDefault: false, ...(returns ? { returns } : {}) });
       goParameters(receiver, node, facts);
       goParameters(node.childForFieldName("parameters"), node, facts);
       goParameters(node.childForFieldName("result"), node, facts);
@@ -641,23 +680,30 @@ function walkGo(node: Node, facts: FileFacts, scope: GoScope): void {
       goDeclared(left ? namedChildren(left) : [], null, right ? namedChildren(right) : [], node, scope, facts);
       break;
     }
+    case "type_switch_statement": {
+      // `switch x := v.(type)`: in each case `x` is something else, which is not followed.
+      for (const name of namedChildren(node.childForFieldName("alias") ?? node).filter((child) => child.type === "identifier")) {
+        facts.locals.push({ name: name.text, kind: "other", line: line(node), endLine: endLine(node), column: column(node) });
+      }
+      break;
+    }
+    case "receive_statement": {
+      // `case x := <-ch:` declares `x` for that case of the `select`.
+      const left = node.childForFieldName("left");
+      const holder = node.parent?.type === "communication_case" ? node.parent : node;
+      if (left && /^\s*:=/.test(node.text.slice(left.text.length))) {
+        for (const name of namedChildren(left)) if (name.type === "identifier" && name.text !== "_") facts.locals.push({ name: name.text, kind: "other", line: line(holder), endLine: endLine(holder), column: column(holder) });
+      }
+      break;
+    }
     case "range_clause": {
       const left = node.childForFieldName("left");
       goDeclared(left ? namedChildren(left) : [], null, [], node, scope, facts);
       break;
     }
     case "call_expression": {
-      const callee = node.childForFieldName("function");
-      const at = { line: line(node), column: column(node) };
-      if (callee?.type === "identifier") facts.calls.push({ callee: callee.text, receiver: null, ...at });
-      if (callee?.type !== "selector_expression") break;
-      const operand = callee.childForFieldName("operand");
-      const field = callee.childForFieldName("field");
-      if (!field) break;
-      if (operand?.type === "identifier") facts.calls.push({ callee: field.text, receiver: operand.text, ...at });
-      else if (operand?.type === "selector_expression" && operand.childForFieldName("operand")?.type === "identifier") {
-        facts.calls.push({ callee: field.text, receiver: operand.text, ...at });
-      }
+      const call = goCallRef(node);
+      if (call) facts.calls.push(call);
       break;
     }
     case "selector_expression":
