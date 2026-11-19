@@ -405,7 +405,8 @@ function walkScript(node: Node, facts: FileFacts, scope: ScriptScope): void {
   // The root is `program`, or `ERROR` when the grammar could not parse the whole file: what it did parse still counts.
   let inner = node.parent === null || node.type === "class_body" ? scope : nested(scope);
   // A block, or anything that takes parameters, starts a scope of its own.
-  if (node.type === "statement_block" || node.childForFieldName("parameters")) inner = { ...inner, scopeEnd: endLine(node) };
+  // A `case` clause counts too: a name declared in one stops at the end of the clause for our purposes.
+  if (node.type === "statement_block" || node.type === "switch_case" || node.type === "switch_default" || node.childForFieldName("parameters")) inner = { ...inner, scopeEnd: endLine(node) };
   // A class that is not a symbol (nested, or an expression) has fields of its own: they are not the outer class's.
   if (node.type === "class" || node.type === "class_declaration" || node.type === "abstract_class_declaration") inner = { ...inner, classRange: null };
   for (const child of namedChildren(node)) walkScript(child, facts, inner);
@@ -567,6 +568,8 @@ function goDeclared(names: Node[], type: string | null, values: Node[], at: Node
   });
 }
 
+const GO_SCOPES = new Set(["block", "function_declaration", "method_declaration", "func_literal", "expression_case", "default_case", "type_case", "communication_case"]);
+
 function walkGo(node: Node, facts: FileFacts, scope: GoScope): void {
   switch (node.type) {
     case "package_clause":
@@ -674,11 +677,200 @@ function walkGo(node: Node, facts: FileFacts, scope: GoScope): void {
       break;
   }
 
-  const opensScope = node.type === "block" || node.type === "function_declaration" || node.type === "method_declaration" || node.type === "func_literal";
+  const opensScope = GO_SCOPES.has(node.type);
   const inner = opensScope ? { ...scope, scopeEnd: endLine(node) } : scope;
   for (const child of namedChildren(node)) walkGo(child, facts, inner);
 }
 
 export function extractGo(root: Node, facts: FileFacts): void {
   walkGo(root, facts, { packages: new Map(), scopeEnd: endLine(root) });
+}
+
+// ---------- Java ----------
+
+interface JavaScope {
+  /** The class, interface, enum or record being walked, qualified by the ones around it: `Outer.Inner`. */
+  owner: string | null;
+  ownerRange: [number, number] | null;
+  /** Last line of the innermost block or method. */
+  scopeEnd: number;
+  /** Inside the body of an anonymous class. */
+  anonymous?: boolean;
+}
+
+/** `Repo` from `Repo`, `Repo<T>`, `a.b.Repo`. Arrays and primitives say nothing about one class. */
+function javaTypeName(type: Node | null | undefined): string | null {
+  if (!type) return null;
+  if (type.type === "generic_type") return javaTypeName(namedChildren(type)[0]);
+  // A single capital letter is a type parameter (`T`, `E`), not a class.
+  return (type.type === "type_identifier" && !/^[A-Z]$/.test(type.text)) || type.type === "scoped_type_identifier" ? type.text.replace(/\s+/g, "") : null;
+}
+
+function javaTypeList(node: Node | null | undefined): string[] {
+  const list = node ? namedChildren(node).find((child) => child.type === "type_list") : undefined;
+  return (list ? namedChildren(list) : []).map((type) => javaTypeName(type)).filter((name): name is string => name !== null);
+}
+
+/** A name with a class written as its type: an instance of it between `line` and `endLine`. `var` takes the type from `new T()`. */
+function javaDeclared(name: Node | null, type: Node | null, value: Node | null, range: { line: number; endLine: number; column: number }, facts: FileFacts): void {
+  if (name?.type !== "identifier") return;
+  const written = type?.text === "var" ? (value?.type === "object_creation_expression" ? javaTypeName(value.childForFieldName("type")) : null) : javaTypeName(type);
+  if (written) facts.locals.push({ name: name.text, kind: "instance", type: written, ...range });
+  else facts.locals.push({ name: name.text, kind: "other", ...range });
+}
+
+function javaUse(name: string, node: Node, facts: FileFacts): void {
+  if (/^[A-Z]$/.test(name)) return;
+  const uses = (facts.uses ??= []);
+  if (!uses.some((use) => use.name === name)) uses.push({ name, line: line(node) });
+}
+
+const JAVA_SCOPES = new Set(["block", "constructor_body", "method_declaration", "constructor_declaration", "lambda_expression", "switch_block_statement_group", "switch_rule"]);
+
+function walkJava(node: Node, facts: FileFacts, scope: JavaScope): void {
+  const here = { line: line(node), endLine: endLine(node), column: column(node) };
+  switch (node.type) {
+    case "package_declaration":
+      facts.package = namedChildren(node).find((child) => child.type === "scoped_identifier" || child.type === "identifier")?.text;
+      return;
+    case "import_declaration": {
+      const path = namedChildren(node).find((child) => child.type === "scoped_identifier" || child.type === "identifier")?.text;
+      if (!path) return;
+      const star = namedChildren(node).some((child) => child.type === "asterisk");
+      const isStatic = children(node).some((child) => child.type === "static");
+      const last = path.slice(path.lastIndexOf(".") + 1);
+      // `import static a.Util.help` names a member of the class `a.Util`; the other forms name a class or a package.
+      const specifier = isStatic && !star ? path.slice(0, Math.max(0, path.lastIndexOf("."))) : path;
+      const fact: ImportFact = { specifier, names: star ? [] : [{ local: last, imported: last }], reexport: false, star, line: line(node) };
+      if (isStatic) fact.static = true;
+      facts.imports.push(fact);
+      return;
+    }
+    case "class_declaration":
+    case "interface_declaration":
+    case "enum_declaration":
+    case "record_declaration":
+    case "annotation_type_declaration": {
+      const name = node.childForFieldName("name")?.text;
+      // A class declared inside an anonymous class has no name anyone else can use.
+      if (!name || scope.anonymous) break;
+      const qualified = scope.owner ? `${scope.owner}.${name}` : name;
+      const symbol: SymbolFact = { name: qualified, kind: "class", line: line(node), endLine: endLine(node), exported: /\bpublic\b/.test(node.child(0)?.text ?? ""), isDefault: false };
+      const parent = javaTypeName(namedChildren(node.childForFieldName("superclass") ?? node)[0]);
+      if (node.childForFieldName("superclass") && parent) symbol.extends = parent;
+      const interfaces = [...javaTypeList(node.childForFieldName("interfaces")), ...javaTypeList(namedChildren(node).find((child) => child.type === "extends_interfaces"))];
+      if (interfaces.length > 0) symbol.embeds = interfaces;
+      addSymbol(facts, symbol);
+
+      // `@Table(name = "users")` on an entity names the table it is stored in.
+      const modifiers = namedChildren(node).find((child) => child.type === "modifiers");
+      for (const annotation of modifiers ? namedChildren(modifiers) : []) {
+        if (annotation.type !== "annotation" || annotation.childForFieldName("name")?.text !== "Table") continue;
+        const pair = namedChildren(annotation.childForFieldName("arguments") ?? annotation).find((child) => child.type === "element_value_pair" && child.childForFieldName("key")?.text === "name");
+        const table = pair?.childForFieldName("value");
+        if (table?.type === "string_literal") facts.tables.push({ name: unquote(table.text).toLowerCase(), op: "define", line: line(annotation) });
+      }
+
+      const inside: JavaScope = { owner: qualified, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node) };
+      // The components of a record are its fields.
+      for (const component of namedChildren(node.childForFieldName("parameters") ?? node).filter((child) => child.type === "formal_parameter")) {
+        const range = { line: line(node), endLine: endLine(node), column: column(node) };
+        javaDeclared(component.childForFieldName("name"), component.childForFieldName("type"), null, range, facts);
+      }
+      for (const child of namedChildren(node)) walkJava(child, facts, inside);
+      return;
+    }
+    case "field_declaration": {
+      if (!scope.ownerRange) break;
+      const range = { line: scope.ownerRange[0], endLine: scope.ownerRange[1], column: 0 };
+      for (const declarator of namedChildren(node).filter((child) => child.type === "variable_declarator")) {
+        const name = declarator.childForFieldName("name");
+        javaDeclared(name, node.childForFieldName("type"), declarator.childForFieldName("value"), range, facts);
+        const type = javaTypeName(node.childForFieldName("type"));
+        if (name && type) facts.locals.push({ name: `this.${name.text}`, kind: "instance", type, ...range });
+      }
+      break;
+    }
+    case "method_declaration":
+    case "constructor_declaration":
+    case "compact_constructor_declaration":
+    case "lambda_expression": {
+      const name = node.childForFieldName("name")?.text;
+      if (node.type === "method_declaration" && name && scope.owner) {
+        addSymbol(facts, { name: `${scope.owner}.${name}`, kind: "method", line: line(node), endLine: endLine(node), exported: false, isDefault: false });
+      }
+      const parameters = node.childForFieldName("parameters");
+      if (parameters?.type === "identifier") facts.locals.push({ name: parameters.text, kind: "other", ...here });
+      for (const parameter of parameters ? namedChildren(parameters) : []) {
+        if (parameter.type === "identifier") facts.locals.push({ name: parameter.text, kind: "other", ...here });
+        else javaDeclared(parameter.childForFieldName("name"), parameter.childForFieldName("type"), null, here, facts);
+      }
+      break;
+    }
+    case "local_variable_declaration":
+      for (const declarator of namedChildren(node).filter((child) => child.type === "variable_declarator")) {
+        javaDeclared(declarator.childForFieldName("name"), node.childForFieldName("type"), declarator.childForFieldName("value"), { ...here, endLine: scope.scopeEnd }, facts);
+      }
+      break;
+    case "enhanced_for_statement":
+    case "resource":
+      javaDeclared(node.childForFieldName("name"), node.childForFieldName("type"), node.childForFieldName("value"), node.type === "resource" ? { ...here, endLine: scope.scopeEnd } : here, facts);
+      break;
+    case "catch_clause": {
+      const parameter = namedChildren(node).find((child) => child.type === "catch_formal_parameter");
+      const type = parameter ? namedChildren(parameter).find((child) => child.type === "catch_type") : undefined;
+      javaDeclared(parameter?.childForFieldName("name") ?? null, type ? (namedChildren(type)[0] ?? null) : null, null, here, facts);
+      break;
+    }
+    case "method_invocation": {
+      const name = node.childForFieldName("name")?.text;
+      const object = node.childForFieldName("object");
+      const at = { line: line(node), column: column(node) };
+      if (!name) break;
+      const implicit = !object || object.type === "this" || object.type === "super";
+      if (implicit && scope.anonymous) break;
+      if (!object) facts.calls.push({ callee: name, receiver: null, ...at });
+      else if (object.type === "identifier" || object.type === "this" || object.type === "super") {
+        facts.calls.push({ callee: name, receiver: object.text, ...at });
+        // `Labels.format()`: a capitalised receiver may be a class that is used without being imported.
+        if (object.type === "identifier" && /^[A-Z]/.test(object.text)) javaUse(object.text, object, facts);
+      } else if (object.type === "field_access" && object.childForFieldName("object")?.type === "this") {
+        const field = object.childForFieldName("field");
+        if (field) facts.calls.push({ callee: name, receiver: `this.${field.text}`, ...at });
+      }
+      break;
+    }
+    case "object_creation_expression": {
+      const type = javaTypeName(node.childForFieldName("type"));
+      if (type) facts.calls.push({ callee: type, receiver: "new", line: line(node), column: column(node) });
+      break;
+    }
+    case "annotation":
+      // `@Query("select o from Order o")` is JPQL: it names entity classes, not tables, unless it is marked native.
+      if (/^(?:Query|NamedQuery)$/.test(node.childForFieldName("name")?.text ?? "") && !/nativeQuery\s*=\s*true/.test(node.text)) return;
+      break;
+    case "type_identifier":
+      javaUse(node.text, node, facts);
+      return;
+    case "scoped_type_identifier":
+      javaUse(node.text.replace(/\s+/g, ""), node, facts);
+      return;
+    case "string_literal":
+      sniffSql(node, facts);
+      return;
+    default:
+      break;
+  }
+
+  let inner = JAVA_SCOPES.has(node.type) ? { ...scope, scopeEnd: endLine(node) } : scope;
+  // The body of `new Foo() { ... }` is a class of its own with no name: its fields are its own, its
+  // methods are not symbols, and what an unqualified call in it means depends on `Foo`, which may not be in this file.
+  if (node.type === "class_body" && node.parent?.type === "object_creation_expression") {
+    inner = { owner: null, ownerRange: [line(node), endLine(node)], scopeEnd: endLine(node), anonymous: true };
+  }
+  for (const child of namedChildren(node)) walkJava(child, facts, inner);
+}
+
+export function extractJava(root: Node, facts: FileFacts): void {
+  walkJava(root, facts, { owner: null, ownerRange: null, scopeEnd: endLine(root) });
 }

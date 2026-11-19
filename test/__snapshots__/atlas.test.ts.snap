@@ -8,41 +8,51 @@ exports[`Atlas on the sample repository > draws a stable Mermaid overview 1`] = 
   n3["jobs/__init__.py"]
   n4["jobs/utils.py"]
   n5["scripts/report.py"]
-  n6["src/api/handler.ts"]
-  n7["src/db/client.ts"]
-  n8["src/db/schema.sql"]
-  n9["src/index.ts"]
-  n10["src/orders/service.ts"]
-  n11["src/users/repo.ts"]
-  n12["web/App.tsx"]
-  n13["web/OrderList.tsx"]
-  n14[("invoices")]
-  n15[("orders")]
-  n16[("users")]
+  n6["shipping/src/main/java/com/acme/shipping/Labels.java"]
+  n7["shipping/src/main/java/com/acme/shipping/ShipmentService.java"]
+  n8["shipping/src/main/java/com/acme/shipping/ShippingApp.java"]
+  n9["shipping/src/main/java/com/acme/shipping/store/ShipmentRepository.java"]
+  n10["src/api/handler.ts"]
+  n11["src/db/client.ts"]
+  n12["src/db/schema.sql"]
+  n13["src/index.ts"]
+  n14["src/orders/service.ts"]
+  n15["src/users/repo.ts"]
+  n16["web/App.tsx"]
+  n17["web/OrderList.tsx"]
+  n18[("invoices")]
+  n19[("orders")]
+  n20[("shipments")]
+  n21[("users")]
   n0 -->|imports| n1
   n0 -->|imports| n2
-  n2 -->|reads_table| n14
+  n2 -->|reads_table| n18
   n5 -->|imports| n3
   n5 -->|imports| n4
-  n5 -->|reads_table| n15
-  n5 -->|reads_table| n16
-  n6 -->|imports| n9
-  n6 -->|imports| n10
-  n6 -->|imports| n11
-  n8 -->|defines_table| n15
-  n8 -->|defines_table| n16
-  n8 -->|reads_table| n16
-  n9 -->|imports| n10
-  n9 -->|imports| n11
-  n10 -->|imports| n7
-  n10 -->|imports| n11
-  n10 -->|reads_table| n15
-  n10 -->|writes_table| n15
-  n10 -->|reads_table| n16
-  n11 -->|imports| n7
-  n11 -->|reads_table| n16
-  n11 -->|writes_table| n16
-  n12 -->|imports| n13
-  n13 -->|imports| n11
+  n5 -->|reads_table| n19
+  n5 -->|reads_table| n21
+  n7 -->|imports| n6
+  n7 -->|imports| n9
+  n8 -->|imports| n7
+  n8 -->|imports| n9
+  n9 -->|writes_table| n20
+  n10 -->|imports| n13
+  n10 -->|imports| n14
+  n10 -->|imports| n15
+  n12 -->|defines_table| n19
+  n12 -->|defines_table| n21
+  n12 -->|reads_table| n21
+  n13 -->|imports| n14
+  n13 -->|imports| n15
+  n14 -->|imports| n11
+  n14 -->|imports| n15
+  n14 -->|reads_table| n19
+  n14 -->|writes_table| n19
+  n14 -->|reads_table| n21
+  n15 -->|imports| n11
+  n15 -->|reads_table| n21
+  n15 -->|writes_table| n21
+  n16 -->|imports| n17
+  n17 -->|imports| n15
 "
 `;

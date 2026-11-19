@@ -297,3 +297,136 @@ describe("Go", () => {
     expect(await edgesOf("uses_env", files, module)).toEqual(["cmd/main.go -> env:REGION"]);
   });
 });
+
+describe("Java", () => {
+  const java = (pkg: string, body: string) => `package ${pkg};\n\n${body}`;
+  const files = {
+    "app/src/main/java/com/acme/app/Main.java": java(
+      "com.acme.app",
+      'import com.acme.store.Repo;\nimport com.acme.util.*;\nimport static com.acme.util.Text.shout;\nimport java.util.List;\nimport com.acme.store.Missing;\n\npublic class Main extends Base {\n    private final Repo repo = new Repo();\n    private Helper helper;\n\n    void run(Service service, List<String> names) {\n        repo.save("a");\n        this.repo.save("b");\n        service.start();\n        helper.help();\n        shout("x");\n        Text.shout("y");\n        setup();\n        super.setup();\n        var other = new Repo();\n        other.find();\n        names.size();\n        String env = System.getenv("APP_ZONE");\n        for (Repo each : List.of(repo)) {\n            each.find();\n        }\n        Runnable later = () -> missing();\n    }\n\n    void shadow(String repo) {\n        repo.save();\n    }\n\n    static class Inner {\n        void go(Main main) {\n            main.run(null, null);\n            outerHelp();\n        }\n    }\n\n    static void outerHelp() {\n    }\n}\n',
+    ),
+    "app/src/main/java/com/acme/app/Base.java": java("com.acme.app", "class Base {\n    void setup() {\n    }\n}\n"),
+    "app/src/main/java/com/acme/app/Service.java": java("com.acme.app", "interface Service extends Startable {\n}\n"),
+    "app/src/main/java/com/acme/app/Startable.java": java("com.acme.app", "interface Startable {\n    void start();\n}\n"),
+    "lib/src/main/java/com/acme/util/Helper.java": java("com.acme.util", "public class Helper {\n    public void help() {\n    }\n}\n"),
+    "lib/src/main/java/com/acme/util/Text.java": java("com.acme.util", "public final class Text {\n    public static String shout(String s) {\n        return s;\n    }\n}\n"),
+    "lib/src/main/java/com/acme/util/Unused.java": java("com.acme.util", "public class Unused {\n}\n"),
+    "lib/src/main/java/com/acme/store/Repo.java": java(
+      "com.acme.store",
+      'import jakarta.persistence.Table;\n\n@Table(name = "Orders")\npublic class Repo {\n    public void save(String id) {\n        run("INSERT INTO audit (id) VALUES (?)");\n    }\n\n    public Object find() {\n        return null;\n    }\n\n    @Query("select o from OrderEntity o")\n    void jpql() {\n    }\n\n    @Query(value = "select * from shipments", nativeQuery = true)\n    void sql() {\n    }\n\n    private void run(String sql) {\n    }\n}\n',
+    ),
+  };
+  const at = (path: string) => path.replace(/^.*\/java\//, "");
+  const edges = async (kind: string) => (await edgesOf(kind, files)).map((edge) => edge.split(" -> ").map(at).join(" -> "));
+
+  it("depends on the files of the classes it names, imported or not", async () => {
+    expect(await edges("imports")).toEqual([
+      "com/acme/app/Main.java -> com/acme/app/Base.java",
+      "com/acme/app/Main.java -> com/acme/app/Service.java",
+      "com/acme/app/Main.java -> com/acme/store/Repo.java",
+      "com/acme/app/Main.java -> com/acme/util/Helper.java",
+      "com/acme/app/Main.java -> com/acme/util/Text.java",
+      "com/acme/app/Main.java -> mod:java.util",
+      "com/acme/app/Service.java -> com/acme/app/Startable.java",
+      "com/acme/store/Repo.java -> mod:jakarta.persistence",
+    ]);
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    expect(link(facts).unresolved.map((item) => item.specifier)).toEqual(["com.acme.store.Missing"]);
+  });
+
+  it("links methods through fields, parameters, interfaces, inheritance, static imports and nested classes", async () => {
+    expect(await edges("calls")).toEqual([
+      "com/acme/app/Main.java#Main -> com/acme/store/Repo.java#Repo",
+      "com/acme/app/Main.java#Main.Inner.go -> com/acme/app/Main.java#Main.outerHelp",
+      "com/acme/app/Main.java#Main.Inner.go -> com/acme/app/Main.java#Main.run",
+      "com/acme/app/Main.java#Main.run -> com/acme/app/Base.java#Base.setup",
+      "com/acme/app/Main.java#Main.run -> com/acme/app/Startable.java#Startable.start",
+      "com/acme/app/Main.java#Main.run -> com/acme/store/Repo.java#Repo",
+      "com/acme/app/Main.java#Main.run -> com/acme/store/Repo.java#Repo.find",
+      "com/acme/app/Main.java#Main.run -> com/acme/store/Repo.java#Repo.save",
+      "com/acme/app/Main.java#Main.run -> com/acme/util/Helper.java#Helper.help",
+      "com/acme/app/Main.java#Main.run -> com/acme/util/Text.java#Text.shout",
+      "com/acme/store/Repo.java#Repo.save -> com/acme/store/Repo.java#Repo.run",
+    ]);
+  });
+
+  it("reads tables from SQL and @Table, not from JPQL, and env keys from System.getenv", async () => {
+    expect([...(await edges("defines_table")), ...(await edges("reads_table")), ...(await edges("writes_table"))]).toEqual([
+      "com/acme/store/Repo.java -> table:orders",
+      "com/acme/store/Repo.java -> table:shipments",
+      "com/acme/store/Repo.java -> table:audit",
+    ]);
+    expect(await edges("uses_env")).toEqual(["com/acme/app/Main.java -> env:APP_ZONE"]);
+  });
+
+  it("gives the same graph whatever order the files come in", async () => {
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    expect(link([...facts].reverse())).toEqual(link(facts));
+  });
+
+  it("looks a type name up where it is written: nested types of the classes around it first, never of an unrelated class", async () => {
+    expect(
+      await edgesOf("calls", {
+        "a/Repo.java": java("a", "class Repo {\n    void save() {\n    }\n}\n"),
+        "a/M.java": java(
+          "a",
+          "class M {\n    void f(Repo r) {\n        r.save();\n    }\n\n    static class In {\n        static class Repo {\n            void save() {\n            }\n        }\n\n        void g(Repo r) {\n            r.save();\n        }\n    }\n}\n\nclass Other {\n    static class Repo {\n        void save() {\n        }\n    }\n}\n",
+        ),
+      }),
+    ).toEqual(["a/M.java#M.In.g -> a/M.java#M.In.Repo.save", "a/M.java#M.f -> a/Repo.java#Repo.save"]);
+  });
+
+  it("keeps an anonymous class apart from the class it is written in", async () => {
+    const result = await edgesOf("calls", {
+      "a/Repo.java": java("a", "class Repo {\n    void save() {\n    }\n}\n"),
+      "a/Svc.java": java("a", "class Svc {\n    void save() {\n    }\n}\n"),
+      "a/M.java": java(
+        "a",
+        "class M {\n    Repo repo;\n\n    void f() {\n        Runnable r = new Runnable() {\n            Svc repo = new Svc();\n\n            public void run() {\n                repo.save();\n                helper();\n            }\n        };\n    }\n\n    void g() {\n        repo.save();\n    }\n\n    void helper() {\n    }\n}\n",
+      ),
+    });
+    expect(result).toEqual(["a/M.java#M.f -> a/Svc.java#Svc", "a/M.java#M.f -> a/Svc.java#Svc.save", "a/M.java#M.g -> a/Repo.java#Repo.save"]);
+  });
+
+  it("does not take a type parameter for a class, or an outer method for one of a value", async () => {
+    expect(
+      await edgesOf("calls", {
+        "a/T.java": java("a", "class T {\n    void save() {\n    }\n}\n"),
+        "a/M.java": java(
+          "a",
+          "class M<T> {\n    void f(T t) {\n        t.save();\n    }\n\n    void close() {\n    }\n\n    static abstract class In extends java.io.InputStream {\n        void own() {\n            close();\n        }\n    }\n\n    void g(In in) {\n        in.close();\n    }\n}\n",
+        ),
+      }),
+    ).toEqual(["a/M.java#M.In.own -> a/M.java#M.close"]);
+  });
+
+  it("prefers the declaration in the nearest source root, and a parameter over a field on one line", async () => {
+    const repo = (mark: string) => java("a", `class Repo {\n    void save${mark}() {\n    }\n}\n`);
+    expect(
+      await edgesOf("calls", {
+        "x/src/main/java/a/Repo.java": repo("X"),
+        "y/src/main/java/a/Repo.java": repo("Y"),
+        "y/src/main/java/a/U.java": java("a", "class U {\n    void f(Repo r) {\n        r.saveY();\n        r.saveX();\n    }\n}\n"),
+        "y/src/main/java/a/Svc.java": java("a", "class Svc {\n    void go() {\n    }\n}\n"),
+        "y/src/main/java/a/One.java": java("a", "class One { Repo repo; void f(Svc repo) { repo.go(); } }\n"),
+      }),
+    ).toEqual(["y/src/main/java/a/One.java#One.f -> y/src/main/java/a/Svc.java#Svc.go", "y/src/main/java/a/U.java#U.f -> y/src/main/java/a/Repo.java#Repo.saveY"]);
+  });
+});
+
+describe("a name declared inside a case clause", () => {
+  it("hides the one around it, in TypeScript and in Go", async () => {
+    expect(
+      await calls({
+        "src/a.ts":
+          "class A {\n  m() {}\n}\nclass B {\n  m() {}\n}\nexport function f(k: number, xs: A[]) {\n  for (const x of xs)\n    switch (k) {\n      case 1:\n        const x = new B();\n        x.m();\n    }\n  const later = 1;\n  const more = 2;\n  return later + more;\n}\n",
+      }),
+    ).toEqual(["src/a.ts#f -> src/a.ts#B", "src/a.ts#f -> src/a.ts#B.m"]);
+    expect(
+      await edgesOf("calls", {
+        "a/a.go":
+          "package a\n\ntype Aa struct{}\n\ntype Bb struct{}\n\nfunc (b Bb) N() {}\n\nfunc f(k int) {\n\tswitch x := (Aa{}); k {\n\tcase 1:\n\t\tvar x Bb\n\t\tx.N()\n\t}\n\tone := 1\n\ttwo := 2\n\tthree := 3\n\t_ = one + two + three\n}\n",
+      }),
+    ).toEqual(["a/a.go#f -> a/a.go#Bb.N"]);
+  });
+});

@@ -36,6 +36,18 @@ const COMPILED_TO_SOURCE: Record<string, string[]> = { ".js": [".ts", ".tsx"], "
 const MAX_REEXPORT_HOPS = 4;
 const MAX_INHERITANCE_DEPTH = 5;
 
+interface Declared {
+  facts: FileFacts;
+  symbol: SymbolFact;
+}
+
+/** A Java import outside the repository, by the start of its package: `java.util`, `org.springframework.web`. */
+function javaModuleName(specifier: string): string {
+  const parts = specifier.split(".");
+  const packageParts = parts.filter((part, index) => index === 0 || /^[a-z_]/.test(part));
+  return packageParts.slice(0, /^(?:java|javax|jakarta|kotlin|scala|android)$/.test(parts[0] ?? "") ? 2 : 3).join(".");
+}
+
 /** A Go type by package folder and name. `from` is the file that wrote the name when it is in that package itself. */
 interface GoType {
   folder: string;
@@ -101,6 +113,9 @@ class Linker {
   private readonly goFolders = new Map<string, FileFacts[]>();
   /** Go: file → the folder each import alias stands for. */
   private readonly goPackages = new Map<string, Map<string, string>>();
+  /** Java: fully qualified name → where the type is declared. A name can be declared in several source roots. */
+  private readonly javaTypes = new Map<string, Declared[]>();
+  private readonly javaPackages = new Set<string>();
   private readonly aliases: PathAlias[];
 
   private readonly files: FileFacts[];
@@ -112,6 +127,16 @@ class Linker {
       this.byPath.set(facts.path, facts);
       this.symbols.set(facts.path, new Map(facts.symbols.map((symbol) => [symbol.name, symbol])));
       for (const symbol of facts.symbols) if (symbol.kind === "class") this.classes.set(symbolId(facts.path, symbol.name), { facts, symbol });
+      if (facts.language === "java") {
+        const prefix = facts.package ? `${facts.package}.` : "";
+        this.javaPackages.add(facts.package ?? "");
+        for (const symbol of facts.symbols) {
+          if (symbol.kind !== "class") continue;
+          const declared = this.javaTypes.get(prefix + symbol.name) ?? [];
+          this.javaTypes.set(prefix + symbol.name, declared);
+          declared.push({ facts, symbol });
+        }
+      }
       if (facts.language === "go") {
         const folder = folderOf(facts.path);
         const files = this.goFolders.get(folder) ?? [];
@@ -329,8 +354,140 @@ class Linker {
     return declared && fieldType ? this.goMethod(this.goType(declared.facts, fieldType), call.callee) : null;
   }
 
+  // ---------- Java ----------
+
+  /** The declaration of a fully qualified name, the one nearest to `from` when several source roots declare it. */
+  private javaDeclared(name: string, from: string): Declared | null {
+    const declared = this.javaTypes.get(name);
+    if (!declared || declared.length < 2) return declared?.[0] ?? null;
+    const shared = (path: string): number => {
+      const a = path.split("/");
+      const b = from.split("/");
+      let count = 0;
+      while (count < a.length && count < b.length && a[count] === b[count]) count++;
+      return count;
+    };
+    return declared.reduce((best, candidate) => (shared(candidate.facts.path) > shared(best.facts.path) ? candidate : best));
+  }
+
+  /**
+   * The type a name stands for where it is written, in Java's own order: a type nested in the
+   * classes around it (`within`), a top-level type of the file, a single-type import, the package,
+   * a wildcard import, and last a fully qualified name.
+   */
+  private javaType(facts: FileFacts, written: string, within: string | null): Declared | null {
+    const own = this.symbols.get(facts.path);
+    for (let around = within; around; around = around.includes(".") ? around.slice(0, around.lastIndexOf(".")) : null) {
+      const nested = own?.get(`${around}.${written}`);
+      if (nested?.kind === "class") return { facts, symbol: nested };
+    }
+    const top = own?.get(written);
+    if (top?.kind === "class") return { facts, symbol: top };
+    const [first, ...rest] = written.split(".");
+    const tail = rest.length > 0 ? `.${rest.join(".")}` : "";
+    const imported = facts.imports.find((fact) => !fact.static && !fact.star && fact.names[0]?.local === first);
+    const candidates = [
+      ...(imported ? [imported.specifier + tail] : []),
+      (facts.package ? `${facts.package}.` : "") + written,
+      ...facts.imports.filter((fact) => fact.star && !fact.static).map((fact) => `${fact.specifier}.${written}`),
+      written,
+    ];
+    for (const name of candidates) {
+      const found = this.javaDeclared(name, facts.path);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /**
+   * A method of a Java type: its own or one it inherits. With `fromInside`, for a call written
+   * inside the type with no receiver, also a method of the types around a nested one.
+   */
+  private javaMethod(type: Declared | null, method: string, fromInside = false, depth = 0): string | null {
+    if (!type) return null;
+    const name = type.symbol.name;
+    const own = `${name}.${method}`;
+    if (this.symbols.get(type.facts.path)?.has(own)) return symbolId(type.facts.path, own);
+    if (depth >= MAX_INHERITANCE_DEPTH) return null;
+    const parents = [...(type.symbol.extends ? [type.symbol.extends] : []), ...(type.symbol.embeds ?? [])].map((parent) => this.javaType(type.facts, parent, name));
+    const outer = fromInside && name.includes(".") ? this.symbols.get(type.facts.path)?.get(name.slice(0, name.lastIndexOf("."))) : undefined;
+    if (outer) parents.push({ facts: type.facts, symbol: outer });
+    for (const parent of parents) {
+      const found = parent && parent.symbol !== type.symbol ? this.javaMethod(parent, method, fromInside, depth + 1) : null;
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** The innermost class of `facts` around `line`. */
+  private javaOwner(facts: FileFacts, line: number): Declared | null {
+    let best: SymbolFact | null = null;
+    for (const symbol of facts.symbols) {
+      if (symbol.kind !== "class" || line < symbol.line || line > symbol.endLine) continue;
+      if (!best || symbol.endLine - symbol.line <= best.endLine - best.line) best = symbol;
+    }
+    return best ? { facts, symbol: best } : null;
+  }
+
+  private javaCall(facts: FileFacts, call: FileFacts["calls"][number]): string | null {
+    const owner = this.javaOwner(facts, call.line);
+    const within = owner?.symbol.name ?? null;
+    if (call.receiver === "new") {
+      const type = this.javaType(facts, call.callee, within);
+      return type ? symbolId(type.facts.path, type.symbol.name) : null;
+    }
+    if (call.receiver === null || call.receiver === "this") {
+      const own = this.javaMethod(owner, call.callee, call.receiver === null);
+      if (own || call.receiver === "this") return own;
+      // `import static a.Util.help` or `import static a.Util.*`
+      for (const fact of facts.imports) {
+        if (!fact.static || (!fact.star && fact.names[0]?.local !== call.callee)) continue;
+        const found = this.javaMethod(this.javaDeclared(fact.specifier, facts.path), call.callee);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (call.receiver === "super") {
+      const parents = owner ? [...(owner.symbol.extends ? [owner.symbol.extends] : []), ...(owner.symbol.embeds ?? [])] : [];
+      for (const parent of parents) {
+        const found = this.javaMethod(this.javaType(facts, parent, within), call.callee);
+        if (found) return found;
+      }
+      return null;
+    }
+    const local = this.local(facts, call.receiver, call.line, call.column);
+    if (local) return local.kind === "instance" && local.type ? this.javaMethod(this.javaType(facts, local.type, within), call.callee) : null;
+    // `Labels.format()`: a static method of a class.
+    return /^[A-Z]/.test(call.receiver) && !call.receiver.includes(".") ? this.javaMethod(this.javaType(facts, call.receiver, within), call.callee) : null;
+  }
+
+  /**
+   * A Java file depends on the file of every class it names: the ones it imports, and the ones of
+   * its own package or of a wildcard import, which it uses without naming their file anywhere.
+   */
+  private addJavaImports(facts: FileFacts): void {
+    const from = fileId(facts.path);
+    for (const fact of facts.imports) {
+      const packageName = fact.star && !fact.static ? fact.specifier : fact.specifier.slice(0, Math.max(0, fact.specifier.lastIndexOf(".")));
+      const declared = fact.star && !fact.static ? null : this.javaDeclared(fact.specifier, facts.path);
+      if (declared) this.edge(from, fileId(declared.facts.path), "imports", fact.line);
+      else if (this.javaPackages.has(packageName) || this.javaTypes.has(packageName)) {
+        // A wildcard import of a package of this repository is settled by the names used, below.
+        if (!fact.star || fact.static) this.unresolved.push({ file: facts.path, specifier: fact.specifier, line: fact.line });
+      } else {
+        const name = javaModuleName(fact.specifier);
+        this.edge(from, this.node({ id: moduleId(name), kind: "module", name, file: null, line: null, detail: "java" }), "imports", fact.line);
+      }
+    }
+    for (const use of facts.uses ?? []) {
+      const declared = this.javaType(facts, use.name, this.javaOwner(facts, use.line)?.symbol.name ?? null);
+      if (declared && declared.facts.path !== facts.path) this.edge(from, fileId(declared.facts.path), "imports", use.line);
+    }
+  }
+
   private addImports(facts: FileFacts): void {
     if (facts.language === "go") return this.addGoImports(facts);
+    if (facts.language === "java") return this.addJavaImports(facts);
     const python = facts.language === "python";
     if (!python && !isScript(facts)) return;
     const from = fileId(facts.path);
@@ -418,14 +575,19 @@ class Linker {
     return this.findExport(binding.file, binding.imported === "=" ? "default" : binding.imported, hops);
   }
 
-  /** What `name` is at `line`, when the file says so itself: the latest declaration still in scope. */
+  /** What `name` is at `line`, when the file says so itself: the innermost declaration still in scope. */
   private local(facts: FileFacts, name: string, line: number, column?: number): LocalFact | null {
     let best: LocalFact | null = null;
     for (const local of facts.locals) {
       if (local.name !== name || line < local.line || line > local.endLine) continue;
       // On the line where the scope opens, only what comes after its start is inside it.
       if (line === local.line && column !== undefined && local.column !== undefined && column < local.column) continue;
-      if (!best || local.line > best.line || (local.line === best.line && local.endLine < best.endLine)) best = local;
+      // The declaration with the smallest scope around the line wins: a parameter over a field, an inner block over an outer one.
+      const span = local.endLine - local.line;
+      const bestSpan = best ? best.endLine - best.line : Infinity;
+      // Between two of the same size (a field and a parameter on one line), the one written later is the inner one.
+      const later = best !== null && (local.line > best.line || (local.line === best.line && (local.column ?? 0) >= (best.column ?? 0)));
+      if (span < bestSpan || (span === bestSpan && later)) best = local;
     }
     return best;
   }
@@ -480,6 +642,8 @@ class Linker {
       const classId = caller?.name.includes(".") ? symbolId(facts.path, caller.name.split(".")[0] ?? "") : null;
       if (facts.language === "go") {
         target = this.goCall(facts, call);
+      } else if (facts.language === "java") {
+        target = this.javaCall(facts, call);
       } else if (call.receiver === null) {
         // `const { parse } = db; parse()` is a call of `db.parse`.
         // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.

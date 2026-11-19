@@ -1,4 +1,4 @@
-export type Language = "typescript" | "tsx" | "javascript" | "python" | "go" | "sql" | "markdown" | "env";
+export type Language = "typescript" | "tsx" | "javascript" | "python" | "go" | "java" | "sql" | "markdown" | "env";
 
 export interface SymbolFact {
   /** Qualified inside the file: `name` for top-level, `Class.method` for members. */
@@ -10,7 +10,7 @@ export interface SymbolFact {
   isDefault: boolean;
   /** For a class: the name it extends, as written in this file. */
   extends?: string;
-  /** For a Go struct: the types it embeds, whose methods it gets. */
+  /** For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. */
   embeds?: string[];
   /** For a Go struct: field name → the type written for it (`Store`, `db.Repo`). */
   fields?: Record<string, string>;
@@ -64,13 +64,15 @@ export interface ImportFact {
   /** `export * from "x"` or `from x import *`. */
   star: boolean;
   line: number;
+  /** Java: `import static`, which names members of a class instead of a class or a package. */
+  static?: boolean;
   /** Go: the names of the package this file uses (`pkg.Name`), to tell which of the package's files it depends on. */
   members?: string[];
 }
 
 export interface CallFact {
   callee: string;
-  /** `obj` in `obj.callee()`, `this` / `self` / `super`, or `this.field` in `this.field.callee()`. */
+  /** `obj` in `obj.callee()`, `this` / `self` / `super`, `this.field` in `this.field.callee()`, or `new` for `new Callee()` in Java. */
   receiver: string | null;
   line: number;
   /** Where on the line the call starts, to tell `run(x, (run) => 1)` apart from a call inside the inner function. */
@@ -100,8 +102,10 @@ export interface DocRefFact {
 export interface FileFacts {
   path: string;
   language: Language;
-  /** Go: the name in the `package` clause. Files of one folder can belong to two packages (`x` and `x_test`). */
+  /** Go: the name in the `package` clause. Files of one folder can belong to two packages (`x` and `x_test`). Java: the declared package. */
   package?: string;
+  /** Java: the type names the file mentions, with the line of the first mention. A class of the same package is used without an import. */
+  uses?: { name: string; line: number }[];
   symbols: SymbolFact[];
   imports: ImportFact[];
   calls: CallFact[];
