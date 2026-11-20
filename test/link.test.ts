@@ -46,6 +46,38 @@ describe("possibleCallers", () => {
   });
 });
 
+describe("impact through a name used without a call", () => {
+  const file = (path: string) => ({ id: `file:${path}`, kind: "file" as const, name: path, file: path, line: null, detail: "typescript" });
+  const parse = { id: "sym:store.ts#parse", kind: "symbol" as const, name: "parse", file: "store.ts", line: 1, detail: "function" };
+  const nodes = [file("store.ts"), parse, file("names.ts"), file("above.ts"), file("barrel.ts"), file("both.ts"), file("top.ts")];
+  const edge = (src: string, kind: "imports" | "references" | "defines", dst: string) => ({ src, dst, kind, line: 1 });
+  const graph = new Graph(nodes, [
+    edge("file:store.ts", "defines", parse.id),
+    edge("file:names.ts", "references", parse.id),
+    edge("file:above.ts", "imports", "file:names.ts"),
+    // both.ts names parse and also imports the file through a barrel; top.ts imports both.ts.
+    edge("file:barrel.ts", "imports", "file:store.ts"),
+    edge("file:both.ts", "references", parse.id),
+    edge("file:both.ts", "imports", "file:barrel.ts"),
+    edge("file:top.ts", "imports", "file:both.ts"),
+  ]);
+  const reached = (target: string, depth?: number) => {
+    const node = graph.node(target);
+    const result = node ? impact(graph, node, depth) : null;
+    return { ids: result?.affected.map((entry) => `${entry.node.name}@${entry.distance}`).sort(), truncated: result?.truncatedAtDepth };
+  };
+
+  it("lists the file that names the symbol and goes no further from it", () => {
+    expect(reached(parse.id).ids).toEqual(["both.ts@1", "names.ts@1"]);
+  });
+
+  it("still follows such a file when an import reaches it too", () => {
+    // Asked about the file: both.ts is named first (for parse) and reached again through the barrel, so top.ts counts.
+    expect(reached("file:store.ts").ids).toEqual(["barrel.ts@1", "both.ts@1", "names.ts@1", "top.ts@3"]);
+    expect(reached("file:store.ts", 1)).toEqual({ ids: ["barrel.ts@1", "both.ts@1", "names.ts@1"], truncated: 1 });
+  });
+});
+
 describe("link", () => {
   it("resolves relative imports, compiled extensions and index files", () => {
     const edges = edgeList([

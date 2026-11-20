@@ -143,6 +143,8 @@ class Linker {
   private readonly symbolsByShortName = new Map<string, string[]>();
   private readonly resolvedImports = new Map<string, Map<ImportFact, string>>();
   private readonly outsideCache = new Map<string, Set<string>>();
+  /** File and symbol → where the file names that symbol of another file. */
+  private readonly named = new Map<string, { file: string; symbol: string; line: number }>();
   private readonly pythonSuffixCache = new Map<string, string | null>();
   private readonly submodules = new Map<string, Map<string, string>>();
   private readonly bindingCache = new Map<string, Map<string, Binding>>();
@@ -225,6 +227,8 @@ class Linker {
       this.addCalls(facts);
       this.addTablesAndEnvs(facts);
     }
+    for (const facts of this.files) this.addNamedImports(facts);
+    this.addReferences();
     for (const facts of this.files) this.addDocRefs(facts);
 
     const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -234,6 +238,48 @@ class Linker {
       unresolved: this.unresolved,
       unbound: [...this.unbound.values()].sort((a, b) => byId(a.name, b.name) || byId(a.src, b.src)),
     };
+  }
+
+  /** Notes that a file names a symbol of another file. Whether that becomes an edge is settled once the calls are known. */
+  private refer(from: FileFacts, symbol: string | null, line: number): void {
+    if (!symbol || !this.nodes.has(symbol) || symbol.startsWith(`sym:${from.path}#`)) return;
+    const key = `${from.path}\u0000${symbol}`;
+    if (!this.named.has(key)) this.named.set(key, { file: from.path, symbol, line });
+  }
+
+  /** TypeScript, JavaScript and Python: the names a file imports from another file of the repository, followed through re-exports to where they are defined. */
+  private addNamedImports(facts: FileFacts): void {
+    const resolved = this.resolvedImports.get(facts.path);
+    if (!resolved) return;
+    for (const fact of facts.imports) {
+      const file = fact.reexport ? undefined : resolved.get(fact);
+      if (!file) continue;
+      for (const name of fact.names) {
+        if (name.imported !== "*") this.refer(facts, this.findExport(file, name.imported === "=" ? "default" : name.imported), fact.line);
+      }
+    }
+  }
+
+  /**
+   * A `references` edge for each symbol a file names without calling it: a type it is written
+   * with, a function it passes on, a class it extends, or a call of it that could not be bound.
+   * Where the file has a call to the symbol, or to a method it defines, the call already says so
+   * and nothing is added.
+   */
+  private addReferences(): void {
+    const called = new Set<string>();
+    for (const edge of this.edges.values()) {
+      if (edge.kind !== "calls") continue;
+      const file = this.nodes.get(edge.src)?.file;
+      if (!file) continue;
+      called.add(`${file}\u0000${edge.dst}`);
+      // A call of `Store.save` uses `Store`, whichever file holds that method of it.
+      const name = this.nodes.get(edge.dst)?.name ?? "";
+      if (name.includes(".")) called.add(`${file}\u0000.${name.slice(0, name.lastIndexOf("."))}`);
+    }
+    for (const [key, { file, symbol, line }] of this.named) {
+      if (!called.has(key) && !called.has(`${file}\u0000.${this.nodes.get(symbol)?.name ?? ""}`)) this.edge(fileId(file), symbol, "references", line);
+    }
   }
 
   private node(node: GraphNode): string {
@@ -364,6 +410,7 @@ class Linker {
         return members.some((member) => this.goDeclares(file, member) || [...(own?.keys() ?? [])].some((name) => name.startsWith(`${member}.`)));
       });
       for (const file of placed && used.length > 0 ? used : files) this.edge(from, fileId(file.path), "imports", fact.line);
+      for (const member of members) this.refer(facts, this.goSymbol(folder, member, null), fact.line);
     }
   }
 
@@ -589,8 +636,10 @@ class Linker {
     for (const fact of facts.imports) {
       const packageName = fact.star && !fact.static ? fact.specifier : fact.specifier.slice(0, Math.max(0, fact.specifier.lastIndexOf(".")));
       const declared = fact.star && !fact.static ? null : this.javaDeclared(fact.specifier, facts.path);
-      if (declared) this.edge(from, fileId(declared.facts.path), "imports", fact.line);
-      else if (this.javaPackages.has(packageName) || this.javaTypes.has(packageName)) {
+      if (declared) {
+        this.edge(from, fileId(declared.facts.path), "imports", fact.line);
+        if (!fact.static) this.refer(facts, symbolId(declared.facts.path, declared.symbol.name), fact.line);
+      } else if (this.javaPackages.has(packageName) || this.javaTypes.has(packageName)) {
         // A wildcard import of a package of this repository is settled by the names used, below.
         if (!fact.star || fact.static) this.unresolved.push({ file: facts.path, specifier: fact.specifier, line: fact.line });
       } else {
@@ -603,7 +652,10 @@ class Linker {
       const first = use.name.split(".")[0] ?? use.name;
       if (use.maybe && (this.local(facts, first, use.line) || facts.imports.some((fact) => fact.static && !fact.star && fact.names[0]?.local === first))) continue;
       const declared = this.javaType(facts, use.name, this.javaOwner(facts, use.line)?.symbol.name ?? null);
-      if (declared && declared.facts.path !== facts.path) this.edge(from, fileId(declared.facts.path), "imports", use.line);
+      if (declared && declared.facts.path !== facts.path) {
+        this.edge(from, fileId(declared.facts.path), "imports", use.line);
+        this.refer(facts, symbolId(declared.facts.path, declared.symbol.name), use.line);
+      }
     }
   }
 
@@ -801,7 +853,10 @@ class Linker {
     const nearest = (files: FileFacts[]) => files.reduce<FileFacts | null>((best, candidate) => (!best || sharedSegments(candidate.path, facts.path) > sharedSegments(best.path, facts.path) ? candidate : best), null);
     for (const use of facts.uses ?? []) {
       const type = this.rubyType(facts, use.name, use.line, use.outside);
-      let found = type ? this.rubyHomes(type, facts.path).map((home) => home.facts) : [];
+      const homes = type ? this.rubyHomes(type, facts.path) : [];
+      // A module that only holds other names is opened in many files, and none of them is what the name stands for.
+      for (const home of homes) if (!home.symbol.namespace) this.refer(facts, symbolId(home.facts.path, home.symbol.name), use.line);
+      let found = homes.map((home) => home.facts);
       if (found.length === 0) {
         const holder = nearest(this.rubyNames(facts, use.name, use.line, use.outside).map((name) => this.rubyConstants.get(name)).find((files) => files !== undefined) ?? []);
         if (holder) found = [holder];
@@ -1075,7 +1130,11 @@ class Linker {
       const reachedNoFile = target !== null && start > 0 && target.rest.length === path.length - start;
       const leadsNowhere = !target || (reachedNoFile && first !== undefined && !item && !this.rustDeclares(target.facts, first));
       if (leadsNowhere) this.unresolved.push({ file: facts.path, specifier: fact.specifier, line: fact.line });
-      else if (target) this.edge(from, fileId((item ?? target).facts.path), "imports", fact.line);
+      else if (target) {
+        this.edge(from, fileId((item ?? target).facts.path), "imports", fact.line);
+        // `pub use` passes the name on, like a re-export in a barrel: whoever uses it is linked to where it is defined.
+        if (item && !fact.reexport) this.refer(facts, symbolId(item.facts.path, item.name), fact.line);
+      }
     }
   }
 

@@ -2,7 +2,7 @@ import type { Graph } from "../graph/graph.js";
 import { fileId, type EdgeKind, type GraphNode } from "../graph/types.js";
 
 /** Edges where the source depends on the destination, so a change to the destination can break the source. */
-export const DEPENDENCY_KINDS: ReadonlySet<EdgeKind> = new Set(["imports", "calls", "reads_table", "writes_table", "uses_env", "documents"]);
+export const DEPENDENCY_KINDS: ReadonlySet<EdgeKind> = new Set(["imports", "calls", "references", "reads_table", "writes_table", "uses_env", "documents"]);
 const OWNED_KINDS: ReadonlySet<EdgeKind> = new Set(["defines", "defines_table", "declares_env"]);
 const DEFINES: ReadonlySet<EdgeKind> = new Set(["defines"]);
 
@@ -72,10 +72,13 @@ export function seedsOf(graph: Graph, target: GraphNode): string[] {
  * Reverse reachability over dependency edges from a set of changed nodes. Symbol-level paths stay
  * precise (callers of callers). A file reached through an import is followed to its own importers,
  * because which of its symbols are affected is unknown. A doc that mentions an affected node is
- * reported but not followed: docs citing that doc are not affected.
+ * reported but not followed: docs citing that doc are not affected. Nor is a file that names a
+ * changed symbol without calling it (`references`): it is affected, its importers are not known to be.
  */
 export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infinity): { affected: ImpactEntry[]; truncated: boolean } {
   const visited = new Set(seeds);
+  // Reached only by naming a changed symbol: reported, and followed only if something stronger reaches it too.
+  const named = new Set<string>();
   const affected: ImpactEntry[] = [];
   let frontier = [...seeds];
   let distance = 0;
@@ -83,19 +86,28 @@ export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infini
 
   while (frontier.length > 0) {
     if (distance >= maxDepth) {
-      truncated = frontier.some((id) => graph.in(id, DEPENDENCY_KINDS).some((edge) => !visited.has(edge.src)));
+      truncated = frontier.some((id) => graph.in(id, DEPENDENCY_KINDS).some((edge) => !visited.has(edge.src) || (edge.kind !== "references" && named.has(edge.src))));
       break;
     }
     distance++;
     const next: string[] = [];
     for (const id of frontier) {
       for (const edge of graph.in(id, DEPENDENCY_KINDS)) {
-        if (visited.has(edge.src)) continue;
+        if (visited.has(edge.src)) {
+          // Listed for naming a symbol, and now an import or a call reaches it as well: follow it after all.
+          if (edge.kind !== "references" && named.delete(edge.src)) next.push(edge.src);
+          continue;
+        }
         const node = graph.node(edge.src);
         if (!node) continue;
         visited.add(node.id);
         affected.push({ node, distance, via: edge.kind, through: id });
         if (node.detail === "markdown") continue;
+        // A file that only names a changed symbol is affected itself; which of its own parts, and so who is next, is not known.
+        if (edge.kind === "references") {
+          named.add(node.id);
+          continue;
+        }
         next.push(node.id);
         if (node.kind !== "symbol") continue;
         const owner = graph.in(node.id, DEFINES)[0]?.src;

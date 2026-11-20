@@ -5,6 +5,7 @@ export const EDGE_KINDS = [
   "imports",
   "defines",
   "calls",
+  "references",
   "defines_table",
   "reads_table",
   "writes_table",

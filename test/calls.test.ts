@@ -63,6 +63,66 @@ describe("calls under another name", () => {
   });
 });
 
+describe("names used without a call", () => {
+  const references = (files: Record<string, string>, options: LinkOptions = {}) => edgesOf("references", files, options);
+  const goModule: LinkOptions = { aliases: [{ scope: "", prefix: "example.com/shop", exact: true, targets: [""], language: "go" }, { scope: "", prefix: "example.com/shop/", exact: false, targets: [""], language: "go" }] };
+
+  it("links a file to what it imports by name and does not call, through a barrel to where it is defined", async () => {
+    expect(
+      await references({
+        "src/store.ts": "export class Store {\n  save() {}\n}\nexport class Row {}\nexport function parse() {}\nexport function format() {}\nexport const LIMIT = 1;\n",
+        "src/index.ts": 'export * from "./store";\n',
+        "src/types.ts": 'import type { Store, Row } from "./index";\nexport function keep(store: Store, row: Row) {\n  store.save();\n}\n',
+        "src/pass.ts": 'import { parse, format, LIMIT } from "./store";\nexport const handlers = [parse];\nformat();\nconsole.log(LIMIT);\n',
+        "src/all.ts": 'import * as store from "./store";\nexport const s = store;\n',
+      }),
+    ).toEqual([
+      // parse is passed on, never called. format is called, and LIMIT is not a symbol.
+      "src/pass.ts -> src/store.ts#parse",
+      // Row is only a type here. Store is not listed: the call of its method already says the file uses it.
+      "src/types.ts -> src/store.ts#Row",
+    ]);
+  });
+
+  it("leaves the edge out when a method of the class is called, wherever that method is written", async () => {
+    expect(
+      await references(
+        {
+          "store/row.go": "package store\n\ntype Row struct{}\n\ntype Kept struct{}\n",
+          "store/row_save.go": "package store\n\nfunc (r Row) Save() {}\n",
+          "cmd/main.go": 'package main\n\nimport "example.com/shop/store"\n\nfunc main() {\n\tr := store.Row{}\n\tr.Save()\n\tvar k store.Kept\n\t_ = k\n}\n',
+          "src/lib.rs": "mod row;\npub use crate::row::Row;\n",
+          "src/row.rs": "pub struct Row;\n",
+        },
+        goModule,
+      ),
+    ).toEqual(["cmd/main.go -> store/row.go#Kept"]);
+  });
+
+  it("does the same for a name taken from a Python module, a Go package, a Java or Ruby class and a Rust item", async () => {
+    expect(
+      await references({
+        "jobs/models.py": "class Report:\n    pass\n\ndef build():\n    pass\n",
+        "jobs/run.py": "from jobs.models import Report, build\n\ndef main(report: Report):\n    build()\n",
+        "store/store.go": "package store\n\ntype Row struct{}\n\nfunc Open() {}\n",
+        "cmd/main.go": 'package main\n\nimport "example.com/shop/store"\n\nfunc main() {\n\tvar row store.Row\n\t_ = row\n\tstore.Open()\n}\n',
+        "src/main/java/shop/Row.java": "package shop;\n\npublic class Row {}\n",
+        "src/main/java/shop/app/Use.java": "package shop.app;\n\nimport shop.Row;\n\npublic class Use {\n  Row row;\n}\n",
+        "lib/row.rb": "class Row\nend\n",
+        "lib/use.rb": "def rows\n  [Row]\nend\n",
+        "src/lib.rs": "mod row;\nuse crate::row::Row;\npub fn keep(_row: Row) {}\n",
+        "src/row.rs": "pub struct Row;\nimpl Row {\n    pub fn new() -> Row {\n        Row\n    }\n}\n",
+      }, goModule),
+    ).toEqual([
+      "cmd/main.go -> store/store.go#Row",
+      "jobs/run.py -> jobs/models.py#Report",
+      "lib/use.rb -> lib/row.rb#Row",
+      "src/lib.rs -> src/row.rs#Row",
+      "src/main/java/shop/app/Use.java -> src/main/java/shop/Row.java#Row",
+    ]);
+  });
+});
+
 describe("calls the graph cannot bind", () => {
   const unbound = async (files: Record<string, string>) => {
     const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));

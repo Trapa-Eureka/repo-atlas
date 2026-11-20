@@ -48,7 +48,7 @@ text.kind{fill:var(--dim);font-size:10.5px;pointer-events:none}
 export const PAGE_SCRIPT = String.raw`
 (function () {
   var data = window.ATLAS, N = data.nodes, E = data.edges, KINDS = data.edgeKinds;
-  var DEPENDS = { imports: 1, calls: 1, reads_table: 1, writes_table: 1, uses_env: 1, documents: 1 };
+  var DEPENDS = { imports: 1, calls: 1, references: 1, reads_table: 1, writes_table: 1, uses_env: 1, documents: 1 };
   var OWNS = { defines: 1, defines_table: 1, declares_env: 1 };
   var out = N.map(function () { return []; }), inc = N.map(function () { return []; }), index = {};
   N.forEach(function (n, i) { index[n[0]] = i; });
@@ -144,16 +144,22 @@ export const PAGE_SCRIPT = String.raw`
     if (N[focusIndex][5] === 'class') {
       N.forEach(function (n, i) { if (n[0].indexOf(N[focusIndex][0] + '.') === 0 && distance[i] === undefined) { distance[i] = 0; frontier.push(i); } });
     }
-    var seeds = frontier.slice();
+    var seeds = frontier.slice(), named = {};
     for (var d = 1; frontier.length; d++) {
       var next = [];
       frontier.forEach(function (i) {
         inc[i].forEach(function (e) {
           var from = E[e][0];
-          if (!DEPENDS[KINDS[E[e][2]]] || distance[from] !== undefined) return;
+          var kind = KINDS[E[e][2]];
+          if (!DEPENDS[kind]) return;
+          if (distance[from] !== undefined) {
+            if (kind !== 'references' && named[from]) { named[from] = false; next.push(from); }
+            return;
+          }
           distance[from] = d;
           order.push(from);
           if (N[from][5] === 'markdown') return;
+          if (kind === 'references') { named[from] = true; return; }
           next.push(from);
           if (kindOf(from) !== 'symbol') return;
           inc[from].forEach(function (owner) {

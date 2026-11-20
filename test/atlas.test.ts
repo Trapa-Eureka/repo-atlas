@@ -140,6 +140,18 @@ describe("Atlas on the sample repository", () => {
     atlas.close();
   });
 
+  it("counts a file that names a function without calling it, and stops there", async () => {
+    writeFileSync(join(root, "src/users/table.ts"), 'import { findUser } from "./repo.js";\nexport const lookups = { byId: findUser };\n');
+    writeFileSync(join(root, "src/users/page.ts"), 'import { lookups } from "./table.js";\nexport const page = lookups;\n');
+    const atlas = await Atlas.open(root);
+    expect(relation(atlas.context("findUser"), "referenced by")).toEqual(["file:src/users/table.ts"]);
+    const reached = Object.fromEntries(atlas.impact("findUser").affected.map((entry) => [entry.node.id, entry.via]));
+    expect(reached["file:src/users/table.ts"]).toBe("references");
+    // Which part of table.ts uses findUser is not known, so what imports table.ts is not claimed to be affected.
+    expect(reached["file:src/users/page.ts"]).toBeUndefined();
+    atlas.close();
+  });
+
   it("rebuilds an index left by another version even when told not to refresh", async () => {
     (await Atlas.open(root)).close();
     const db = new DatabaseSync(join(root, ".atlas/graph.db"));
