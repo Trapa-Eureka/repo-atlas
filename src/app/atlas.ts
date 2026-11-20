@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Graph } from "../graph/graph.js";
 import { fileId, symbolId, type GraphNode, type NodeKind } from "../graph/types.js";
-import { indexRepository, lastSummary, unresolvedImports, type IndexOptions, type IndexSummary } from "../indexer/indexer.js";
+import { indexRepository, isCurrent, lastSummary, unresolvedImports, type IndexOptions, type IndexSummary } from "../indexer/indexer.js";
 import type { UnresolvedImport } from "../indexer/link.js";
 import { changes, withoutQuietLines, type ChangesResult } from "../query/changes.js";
 import { context, type ContextResult } from "../query/context.js";
@@ -50,7 +50,8 @@ export class Atlas {
   static async open(root: string, options: OpenOptions = {}): Promise<Atlas> {
     const store = Store.open(root);
     try {
-      const stored = options.noRefresh ? lastSummary(store) : null;
+      // An index from another version is rebuilt even when asked not to refresh: it lacks what this version reads.
+      const stored = options.noRefresh && isCurrent(store) ? lastSummary(store) : null;
       const summary = stored ?? (await indexRepository(root, store, options));
       return new Atlas(root, store, options.cwd ?? root, store.loadGraph(), summary);
     } catch (error) {
@@ -73,6 +74,8 @@ export class Atlas {
     this.store.close();
   }
 
+  private readonly unbound = (name: string) => this.store.unboundCalls(name);
+
   /** A query as typed, plus the same path made relative to the repository root. */
   private spellings(query: string): string[] {
     const fromCwd = relative(this.root, resolve(this.cwd, query)).split(sep).join("/");
@@ -88,11 +91,11 @@ export class Atlas {
   }
 
   context(query: string): ContextResult {
-    return context(this.graph, this.target(query));
+    return context(this.graph, this.target(query), this.unbound);
   }
 
   impact(query: string, depth?: number): ImpactResult {
-    return impact(this.graph, this.target(query), depth);
+    return impact(this.graph, this.target(query), depth, this.unbound);
   }
 
   /** What the changes since `base` (default: the last commit) touch and what depends on that. Reads the changed lines from git. */
@@ -113,7 +116,7 @@ export class Atlas {
       file.ranges = withoutQuietLines(file.ranges, source, node.detail);
       if (file.ranges.length === 0 && file.gaps.length === 0) file.quiet = true;
     }
-    return changes(this.graph, comparison, spans, unresolvedImports(this.store), depth);
+    return changes(this.graph, comparison, spans, unresolvedImports(this.store), depth, this.unbound);
   }
 
   path(from: string, to: string): PathResult {

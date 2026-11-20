@@ -1,6 +1,6 @@
 import type { Graph } from "../graph/graph.js";
 import type { EdgeKind, GraphEdge, GraphNode } from "../graph/types.js";
-import { impact, seedsOf } from "./impact.js";
+import { impact, seedsOf, type UnboundCall } from "./impact.js";
 
 export interface Relation {
   /** How the target relates to the other node, read as "target <relation> node". */
@@ -11,7 +11,8 @@ export interface Relation {
 export interface ContextResult {
   target: GraphNode;
   relations: Relation[];
-  impact: { direct: number; transitive: number; files: number; docs: number };
+  /** `possible`: call sites that use the name of one of the target's methods on a value of unknown type. `commonNames`: its method names used that way too widely to list. */
+  impact: { direct: number; transitive: number; files: number; docs: number; possible: number; commonNames: number };
 }
 
 const OUTGOING: [EdgeKind, string][] = [
@@ -53,7 +54,7 @@ function collect(graph: Graph, edges: readonly GraphEdge[], pick: (edge: GraphEd
  * which tables and env keys it touches, and which docs mention it. For a file, the relations of its
  * symbols are folded in, so "called by" lists callers of any function in the file.
  */
-export function context(graph: Graph, target: GraphNode): ContextResult {
+export function context(graph: Graph, target: GraphNode, unbound: (name: string) => readonly UnboundCall[] = () => []): ContextResult {
   const members = seedsOf(graph, target).filter((id) => graph.node(id)?.kind === "symbol" || id === target.id);
   const inside = new Set(members);
   const relations: Relation[] = [];
@@ -71,7 +72,7 @@ export function context(graph: Graph, target: GraphNode): ContextResult {
     if (nodes.length > 0) relations.push({ relation, nodes });
   }
 
-  const reach = impact(graph, target);
+  const reach = impact(graph, target, Infinity, unbound);
   return {
     target,
     relations,
@@ -80,6 +81,8 @@ export function context(graph: Graph, target: GraphNode): ContextResult {
       transitive: reach.affected.filter((entry) => entry.via !== "contains").length,
       files: reach.affected.filter((entry) => entry.node.kind === "file" && entry.node.detail !== "markdown").length,
       docs: reach.affected.filter((entry) => entry.node.detail === "markdown").length,
+      possible: reach.possible.callers.length,
+      commonNames: reach.possible.common.length,
     },
   };
 }

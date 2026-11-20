@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import { rubyUnderscore, type CallRef, type FileFacts, type ImportFact, type LocalFact, type SymbolFact } from "../extract/index.js";
+import { rubyUnderscore, type CallFact, type CallRef, type FileFacts, type ImportFact, type LocalFact, type SymbolFact } from "../extract/index.js";
 import { envId, fileId, moduleId, symbolId, tableId, type EdgeKind, type GraphEdge, type GraphNode } from "../graph/types.js";
 
 /** One `paths` entry of a tsconfig, or a workspace package, both reduced to "prefix → folders to try". */
@@ -29,6 +29,8 @@ export interface LinkResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
   unresolved: UnresolvedImport[];
+  /** Calls of a method name of this repository that could not be bound to a method. */
+  unbound: UnboundCall[];
 }
 
 const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
@@ -40,6 +42,22 @@ const MAX_CALL_DEPTH = 12;
 const MAX_RUBY_OPENERS = 3;
 // A Rails model includes dozens of modules before its parent is asked. Each is visited once per lookup, so this only bounds the cost.
 const MAX_RUBY_ANCESTORS = 200;
+
+/** A call the linker could not bind, kept because its name is the name of a method of this repository. */
+export interface UnboundCall {
+  name: string;
+  /** The function or method the call is in, or the file for top-level code. */
+  src: string;
+  line: number;
+}
+
+/** What a script can call a method on without importing it. */
+const SCRIPT_GLOBALS: ReadonlySet<string> = new Set(["console", "window", "document", "process", "globalThis", "navigator", "localStorage", "sessionStorage", "crypto", "performance"]);
+
+/** Languages whose code can call each other's methods: TypeScript and JavaScript are one. */
+function family(language: string): string {
+  return language === "tsx" || language === "javascript" ? "typescript" : language;
+}
 
 interface Declared {
   facts: FileFacts;
@@ -117,10 +135,14 @@ class Linker {
   private readonly nodes = new Map<string, GraphNode>();
   private readonly edges = new Map<string, GraphEdge>();
   private readonly unresolved: UnresolvedImport[] = [];
+  private readonly unbound = new Map<string, UnboundCall>();
+  /** The last part of every method name, after its language: what a call on a value of unknown type is matched against. */
+  private readonly methodNames = new Set<string>();
   private readonly byPath = new Map<string, FileFacts>();
   private readonly symbols = new Map<string, Map<string, SymbolFact>>();
   private readonly symbolsByShortName = new Map<string, string[]>();
   private readonly resolvedImports = new Map<string, Map<ImportFact, string>>();
+  private readonly outsideCache = new Map<string, Set<string>>();
   private readonly pythonSuffixCache = new Map<string, string | null>();
   private readonly submodules = new Map<string, Map<string, string>>();
   private readonly bindingCache = new Map<string, Map<string, Binding>>();
@@ -156,7 +178,10 @@ class Linker {
     for (const facts of this.files) {
       this.byPath.set(facts.path, facts);
       this.symbols.set(facts.path, new Map(facts.symbols.map((symbol) => [symbol.name, symbol])));
-      for (const symbol of facts.symbols) if (symbol.kind === "class") this.classes.set(symbolId(facts.path, symbol.name), { facts, symbol });
+      for (const symbol of facts.symbols) {
+        if (symbol.kind === "class") this.classes.set(symbolId(facts.path, symbol.name), { facts, symbol });
+        if (symbol.kind === "method") this.methodNames.add(`${family(facts.language)}:${symbol.name.slice(symbol.name.lastIndexOf(".") + 1)}`);
+      }
       if (facts.language === "java") {
         const prefix = facts.package ? `${facts.package}.` : "";
         this.javaPackages.add(facts.package ?? "");
@@ -207,6 +232,7 @@ class Linker {
       nodes: [...this.nodes.values()].sort((a, b) => byId(a.id, b.id)),
       edges: [...this.edges.values()].sort((a, b) => byId(a.src, b.src) || byId(a.dst, b.dst) || byId(a.kind, b.kind)),
       unresolved: this.unresolved,
+      unbound: [...this.unbound.values()].sort((a, b) => byId(a.name, b.name) || byId(a.src, b.src)),
     };
   }
 
@@ -1270,10 +1296,66 @@ class Linker {
         target = this.scriptTarget(facts, call);
       }
 
-      if (!target) continue;
       const src = caller ? symbolId(facts.path, caller.name) : fileId(facts.path);
-      this.edge(src, target, "calls", call.line);
+      if (target) this.edge(src, target, "calls", call.line);
+      else if (this.methodNames.has(`${family(facts.language)}:${call.callee}`) && this.unknownValue(facts, call)) {
+        const key = `${call.callee}\u0000${src}`;
+        if (!this.unbound.has(key)) this.unbound.set(key, { name: call.callee, src, line: call.line });
+      }
     }
+  }
+
+  /**
+   * Whether a call that could not be bound is made on a value whose type the file does not give
+   * away, so that it may be a method of this repository. Not when the file settles it: a call on
+   * the object itself (looked up already, through its parents), on a path or a name that starts
+   * with a capital (a type, found if it were of this repository), on a variable or field with a
+   * type written or built with `new` (that type was asked and has no such method, or is not of
+   * this repository), or on something imported from outside it.
+   */
+  private unknownValue(facts: FileFacts, call: CallFact): boolean {
+    const receiver = call.receiver;
+    if (receiver === null || receiver === "new" || receiver === "extends") return false;
+    // `super().run()` in Python, `new Client().query()`: the class is known.
+    if (call.via && call.via.receiver === null && call.via.callee === "super") return false;
+    if (call.via?.receiver === "new") return false;
+    // A Rust path (`fs::write`, `std::io::stdout`) names a function, not a value.
+    if (receiver.includes("::") && facts.language === "rust") return false;
+    const root = receiver.replace(/^@/, "").split(/\.|::/)[0] ?? "";
+    if (root === "this" || root === "self" || root === "super" || (root === "cls" && facts.language === "python")) {
+      if (receiver === root) return false;
+    } else {
+      // In Go an exported variable starts with a capital too, so the rule says nothing there.
+      if (/^[A-Z]/.test(root) && facts.language !== "go") return false;
+      if (this.outsideNames(facts).has(root) || (isScript(facts) && SCRIPT_GLOBALS.has(root))) return false;
+    }
+    for (const name of new Set([receiver, root])) {
+      const local = name ? this.local(facts, name, call.line, call.column) : null;
+      // A value made by a call (`x := find()`) has a type only if that function says one, and then the call was bound.
+      if (local && (local.type !== undefined || (local.kind === "instance" && local.from === undefined))) return false;
+    }
+    return true;
+  }
+
+  /** The names a file gave to what it imported from outside the repository. */
+  private outsideNames(facts: FileFacts): Set<string> {
+    const cached = this.outsideCache.get(facts.path);
+    if (cached) return cached;
+    const names = new Set<string>();
+    this.outsideCache.set(facts.path, names);
+    const resolved = this.resolvedImports.get(facts.path);
+    const packages = this.goPackages.get(facts.path);
+    for (const fact of facts.imports) {
+      if (facts.language === "go") {
+        const alias = fact.names[0]?.local ?? fact.specifier.split("/").pop() ?? "";
+        if (!packages?.has(alias)) names.add(alias);
+      } else if (resolved && !resolved.has(fact)) {
+        // `import os.path` binds `os`.
+        for (const name of fact.names) names.add(name.local.split(".")[0] ?? name.local);
+        if (facts.language === "python" && fact.names.length === 0) names.add(fact.specifier.split(".")[0] ?? "");
+      }
+    }
+    return names;
   }
 
   // ---------- tables, env, docs ----------

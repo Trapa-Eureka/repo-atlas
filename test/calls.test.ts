@@ -63,6 +63,59 @@ describe("calls under another name", () => {
   });
 });
 
+describe("calls the graph cannot bind", () => {
+  const unbound = async (files: Record<string, string>) => {
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    return link(facts).unbound.map((call) => `${short(call.src)} ${call.name}:${call.line}`);
+  };
+
+  it("keeps a method name called on a value of unknown type, and nothing the file settles", async () => {
+    expect(
+      await unbound({
+        "src/store.ts": "export class Store {\n  save() {}\n  load() {\n    this.save();\n    this.missing();\n  }\n}\n",
+        "src/use.ts": [
+          'import fs from "node:fs";',
+          'import { Client } from "pg";',
+          'import { Store } from "./store";',
+          "export function run(thing, items) {",
+          "  thing.save();", // unknown value: kept
+          "  thing.save();", // once per caller
+          "  items.forEach((item) => item.load());", // kept
+          "  new Store().save();", // bound: an edge, not a guess
+          "  fs.save();", // imported from outside the repository
+          "  Other.save();", // a type by name, which would have been found
+          "  save();", // no value at all
+          "  thing.unknownName();", // not the name of any method here
+          "  console.save();", // a global
+          "}",
+          "export function typed(client: Client) {",
+          "  const made = new Client();",
+          "  client.save();", // a type is written: it was asked, or is not of this repository
+          "  made.save();",
+          "  new Date().save();",
+          "}",
+          "thing.load();", // top-level code: the file is the caller
+        ].join("\n"),
+        "jobs/a.py": "import os.path\nclass Job(Base):\n    def save(self):\n        super().save()\n        os.save()\n        self.store.save()\n    @classmethod\n    def make(cls):\n        cls.save()\n",
+      }),
+    ).toEqual(["src/use.ts load:21", "src/use.ts#run load:7", "jobs/a.py#Job.save save:6", "src/use.ts#run save:5"]);
+  });
+
+  it("matches a name within one language, and reads each language's own signs of a type", async () => {
+    expect(
+      await unbound({
+        "lib/store.rb": "class Store\n  def execute\n  end\nend\n",
+        // Ruby has a method of this name, Python and Go do not: nothing to guess here.
+        "jobs/run.py": "def main(cursor):\n    cursor.execute()\n",
+        "lib/use.rb": "def run(thing)\n  thing.execute\n  JSON.execute\nend\n",
+        "pkg/store.go": "package pkg\n\ntype Store struct{}\n\nfunc (s *Store) Save() {}\n",
+        "pkg/use.go": 'package pkg\n\nimport "bytes"\n\nvar Default = find()\n\nfunc use(b bytes.Buffer) {\n\tb.Save()\n\tbytes.Save()\n\tDefault.Save()\n}\n',
+        "src/lib.rs": "pub struct Store;\nimpl Store {\n    pub fn write(&self) {}\n}\npub fn run(thing: &Unknown) {\n    std::fs::write();\n    fs::write();\n    make().write();\n}\n",
+      }),
+    ).toEqual(["pkg/use.go#use Save:10", "lib/use.rb#run execute:2", "src/lib.rs#run write:8"]);
+  });
+});
+
 describe("CommonJS", () => {
   it("links require() to module.exports, exports.name and a module passed on whole", async () => {
     expect(

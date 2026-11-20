@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import type { Graph } from "../graph/graph.js";
 import { fileId, type EdgeKind, type GraphNode } from "../graph/types.js";
-import { DEPENDENCY_KINDS, spread, type ImpactEntry } from "./impact.js";
+import { DEPENDENCY_KINDS, possibleCallers, spread, type ImpactEntry, type Possible, type UnboundCall } from "./impact.js";
 
 /** First and last line, both counted, starting at 1. */
 export type LineRange = [number, number];
@@ -55,6 +55,8 @@ export interface ChangesResult {
   /** Imports that lead nowhere now and name a file this change deleted or renamed. */
   broken: { file: string; line: number; specifier: string; gone: string }[];
   affected: ImpactEntry[];
+  /** Call sites that use the name of a changed method on a value of unknown type. Not counted in `affected`. */
+  possible: Possible;
   /** Test files that are changed themselves or depend on something changed. */
   tests: GraphNode[];
   /** Changed code that no test file depends on, even indirectly. */
@@ -258,6 +260,7 @@ export function changes(
   spansOf: (path: string) => readonly Span[],
   unresolved: readonly UnresolvedImport[] = [],
   maxDepth = Infinity,
+  unbound: (name: string) => readonly UnboundCall[] = () => [],
 ): ChangesResult {
   const changed: ChangedEntry[] = [];
   const outside: ChangesResult["outside"] = [];
@@ -300,6 +303,7 @@ export function changes(
     outside,
     broken: brokenImports(comparison.files, unresolved),
     affected,
+    possible: possibleCallers(graph, [...seeds], affected, unbound),
     tests: unique([...changedFiles, ...reached].filter((node) => node.kind === "file" && isTestPath(node.name))),
     untested: untested.sort(byId),
     docs: unique(reached.filter((node) => node.detail === "markdown")),

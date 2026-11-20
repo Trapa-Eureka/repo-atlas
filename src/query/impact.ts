@@ -1,5 +1,5 @@
 import type { Graph } from "../graph/graph.js";
-import type { EdgeKind, GraphNode } from "../graph/types.js";
+import { fileId, type EdgeKind, type GraphNode } from "../graph/types.js";
 
 /** Edges where the source depends on the destination, so a change to the destination can break the source. */
 export const DEPENDENCY_KINDS: ReadonlySet<EdgeKind> = new Set(["imports", "calls", "reads_table", "writes_table", "uses_env", "documents"]);
@@ -15,11 +15,46 @@ export interface ImpactEntry {
   through: string;
 }
 
+/** A call of a method name on a value whose type the graph could not tell. */
+export interface UnboundCall {
+  name: string;
+  src: string;
+  line: number;
+}
+
+/** A place that may call a changed method: it calls a method of that name, on a value of unknown type. */
+export interface PossibleCaller {
+  node: GraphNode;
+  line: number;
+  /** The method it may be calling. */
+  of: string;
+}
+
+/** A method name used on values of unknown type in more places than are worth listing: `get`, `size`, `toString`. */
+export interface CommonName {
+  name: string;
+  /** How many functions and files call something of that name on a value of unknown type. */
+  callers: number;
+  /** The method of that name among what changed. */
+  of: string;
+}
+
+/** What the graph cannot rule in or out. */
+export interface Possible {
+  callers: PossibleCaller[];
+  common: CommonName[];
+}
+
+/** Above this many call sites, a method name says too little about which method is meant. */
+export const MAX_NAMED_CALLERS = 20;
+
 export interface ImpactResult {
   target: GraphNode;
   /** The target plus what it owns (a file's symbols, the tables it defines, the env keys it declares). */
   seeds: string[];
   affected: ImpactEntry[];
+  /** Not counted in `affected`: nothing says these call the target, and nothing says they do not. */
+  possible: Possible;
   truncatedAtDepth: number | null;
 }
 
@@ -76,9 +111,48 @@ export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infini
   return { affected, truncated };
 }
 
+/** The language of the file a node is in, with TypeScript and JavaScript as one. */
+function languageOf(graph: Graph, node: GraphNode | undefined): string | null {
+  const detail = node?.file ? (graph.node(fileId(node.file))?.detail ?? null) : null;
+  return detail === "tsx" || detail === "javascript" ? "typescript" : detail;
+}
+
+/**
+ * The callers the graph cannot rule in or out for the methods among `seeds`: call sites that use a
+ * method's name on a value of unknown type, and are not already known to be affected.
+ */
+export function possibleCallers(graph: Graph, seeds: readonly string[], affected: readonly ImpactEntry[], unbound: (name: string) => readonly UnboundCall[]): Possible {
+  const known = new Set([...seeds, ...affected.map((entry) => entry.node.id)]);
+  const callers = new Map<string, PossibleCaller>();
+  const common = new Map<string, CommonName>();
+  for (const id of seeds) {
+    const seed = graph.node(id);
+    if (seed?.kind !== "symbol" || seed.detail !== "method") continue;
+    const name = seed.name.slice(seed.name.lastIndexOf(".") + 1);
+    if (common.has(name)) continue;
+    // A method is called from its own language: a Ruby `execute` says nothing about a Python one.
+    const language = languageOf(graph, seed);
+    const calls = unbound(name).filter((call) => languageOf(graph, graph.node(call.src)) === language);
+    if (calls.length > MAX_NAMED_CALLERS) {
+      common.set(name, { name, callers: calls.length, of: seed.id });
+      continue;
+    }
+    for (const call of calls) {
+      const node = graph.node(call.src);
+      if (node && !known.has(node.id) && !callers.has(node.id)) callers.set(node.id, { node, line: call.line, of: seed.id });
+    }
+  }
+  return {
+    callers: [...callers.values()].sort((a, b) => (a.node.id < b.node.id ? -1 : 1)),
+    common: [...common.values()].sort((a, b) => (a.name < b.name ? -1 : 1)),
+  };
+}
+
 /** Everything that may need attention when the target changes: the target, what it owns, and whatever depends on those. */
-export function impact(graph: Graph, target: GraphNode, maxDepth = Infinity): ImpactResult {
+export function impact(graph: Graph, target: GraphNode, maxDepth = Infinity, unbound: (name: string) => readonly UnboundCall[] = () => []): ImpactResult {
   const seeds = seedsOf(graph, target);
   const { affected, truncated } = spread(graph, seeds, maxDepth);
-  return { target, seeds, affected, truncatedAtDepth: truncated ? maxDepth : null };
+  // A file is asked about as a whole: its methods are not what the question is about.
+  const possible = target.kind === "symbol" ? possibleCallers(graph, seeds, affected, unbound) : { callers: [], common: [] };
+  return { target, seeds, affected, possible, truncatedAtDepth: truncated ? maxDepth : null };
 }

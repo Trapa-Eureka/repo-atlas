@@ -1,5 +1,6 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -127,6 +128,26 @@ describe("Atlas on the sample repository", () => {
     expect(data.focus).toBe("table:users");
     expect(data.nodes).toHaveLength(94);
     expect(data.edges.every(([src, dst, kind]) => data.nodes[src ?? -1] !== undefined && data.nodes[dst ?? -1] !== undefined && data.edgeKinds[kind ?? -1] !== undefined)).toBe(true);
+  });
+
+  it("lists who may call a method on a value of unknown type, apart from who is known to", async () => {
+    writeFileSync(join(root, "src/orders/audit.ts"), "export function audit(service) {\n  return service.place(1);\n}\n");
+    const atlas = await Atlas.open(root);
+    const result = atlas.impact("OrderService.place");
+    expect(names(result.affected.map((entry) => entry.node))).not.toContain("sym:src/orders/audit.ts#audit");
+    expect(result.possible).toEqual({ callers: [{ node: atlas.target("src/orders/audit.ts#audit"), line: 2, of: "sym:src/orders/service.ts#OrderService.place" }], common: [] });
+    expect(atlas.context("OrderService.place").impact).toMatchObject({ possible: 1, commonNames: 0 });
+    atlas.close();
+  });
+
+  it("rebuilds an index left by another version even when told not to refresh", async () => {
+    (await Atlas.open(root)).close();
+    const db = new DatabaseSync(join(root, ".atlas/graph.db"));
+    db.prepare("UPDATE meta SET value = '0' WHERE key = 'extractor_version'").run();
+    db.close();
+    const atlas = await Atlas.open(root, { noRefresh: true });
+    expect(atlas.summary).toMatchObject({ parsed: 27, relinked: true });
+    atlas.close();
   });
 
   it("re-parses only what changed, and notices deletions", async () => {

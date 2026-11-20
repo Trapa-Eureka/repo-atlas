@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { emptyFacts, type FileFacts } from "../src/extract/facts.js";
 import { Graph } from "../src/graph/graph.js";
 import { link } from "../src/indexer/link.js";
-import { impact } from "../src/query/impact.js";
+import { impact, MAX_NAMED_CALLERS, possibleCallers } from "../src/query/impact.js";
 import { mermaid } from "../src/query/mermaid.js";
 
 function script(path: string, part: Partial<FileFacts> = {}): FileFacts {
@@ -21,6 +21,30 @@ const imports = (specifier: string, names: [string, string][] = [], extra: Parti
 
 const fn = (name: string, line = 1, endLine = line + 5) => ({ name, kind: "function" as const, line, endLine, exported: true, isDefault: false });
 const edgeList = (files: FileFacts[], options = {}) => link(files, options).edges.map((edge) => `${edge.src} -${edge.kind}-> ${edge.dst}`);
+
+describe("possibleCallers", () => {
+  const method = (path: string, name: string) => ({ id: `sym:${path}#${name}`, kind: "symbol" as const, name, file: path, line: 1, detail: "method" });
+  const graph = new Graph(
+    [method("a.ts", "Store.save"), method("a.ts", "Store.get"), method("b.ts", "use"), method("c.ts", "other"), { ...method("d.ts", "plain"), detail: "function" }],
+    [{ src: "sym:b.ts#use", dst: "sym:a.ts#Store.save", kind: "calls", line: 3 }],
+  );
+  const calls = (name: string) =>
+    name === "save"
+      ? [{ name, src: "sym:b.ts#use", line: 3 }, { name, src: "sym:c.ts#other", line: 9 }, { name, src: "sym:gone.ts#x", line: 1 }]
+      : name === "get"
+        ? Array.from({ length: MAX_NAMED_CALLERS + 1 }, (_, index) => ({ name, src: `sym:c.ts#other`, line: index }))
+        : [{ name, src: "sym:c.ts#other", line: 1 }];
+
+  it("lists who may call a method by its name, apart from who is known to, and only counts a name that is everywhere", () => {
+    const save = graph.node("sym:a.ts#Store.save");
+    const result = save && impact(graph, save, Infinity, calls);
+    expect(result?.affected.map((entry) => entry.node.id)).toEqual(["sym:b.ts#use"]);
+    expect(result?.possible).toEqual({ callers: [{ node: graph.node("sym:c.ts#other"), line: 9, of: "sym:a.ts#Store.save" }], common: [] });
+    expect(possibleCallers(graph, ["sym:a.ts#Store.get"], [], calls)).toEqual({ callers: [], common: [{ name: "get", callers: MAX_NAMED_CALLERS + 1, of: "sym:a.ts#Store.get" }] });
+    // A function is called by its name through an import, which the graph follows: nothing is guessed for it.
+    expect(possibleCallers(graph, ["sym:d.ts#plain"], [], calls)).toEqual({ callers: [], common: [] });
+  });
+});
 
 describe("link", () => {
   it("resolves relative imports, compiled extensions and index files", () => {

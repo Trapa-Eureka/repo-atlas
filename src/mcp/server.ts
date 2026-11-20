@@ -68,7 +68,7 @@ export function createMcpServer(root: string): { server: McpServer; close: () =>
   server.registerTool(
     "atlas_impact",
     {
-      description: "Everything that depends on the target, directly or through other code, grouped by distance. Use it to find what a change can break and which docs to update.",
+      description: "Everything that depends on the target, directly or through other code, grouped by distance. Use it to find what a change can break and which docs to update. For a method, `possible` lists the callers that use its name on a value of unknown type: they may call it, and are worth reading.",
       inputSchema: { target: z.string().describe(TARGET), depth: z.number().int().min(1).optional() },
     },
     ({ target, depth }) => answer((a) => a.impact(target, depth)),

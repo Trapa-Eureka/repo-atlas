@@ -3,7 +3,7 @@ import type { IndexSummary } from "../indexer/indexer.js";
 import type { UnresolvedImport } from "../indexer/link.js";
 import type { ChangesResult } from "../query/changes.js";
 import type { ContextResult } from "../query/context.js";
-import type { ImpactResult } from "../query/impact.js";
+import type { ImpactResult, Possible } from "../query/impact.js";
 import type { PathResult } from "../query/path.js";
 import type { StatsResult } from "../query/stats.js";
 
@@ -40,9 +40,27 @@ export function renderContext(result: ContextResult): string {
     lines.push("");
   }
   if (result.relations.length === 0) lines.push("No relations recorded for this node.", "");
-  const { direct, transitive, files, docs } = result.impact;
-  lines.push(`Changing this affects ${direct} nodes directly, ${transitive} in total (${files} code files, ${docs} docs). Details: atlas impact ${result.target.id}`);
+  const { direct, transitive, files, docs, possible, commonNames } = result.impact;
+  const maybe = `${possible > 0 ? `, and possibly ${possible} more call ${possible === 1 ? "site" : "sites"}` : ""}${commonNames > 0 ? `; ${commonNames === 1 ? "its name is" : `${commonNames} of its method names are`} too common to tell who else calls it` : ""}`;
+  lines.push(`Changing this affects ${direct} nodes directly, ${transitive} in total (${files} code files, ${docs} docs)${maybe}. Details: atlas impact ${result.target.id}`);
   return lines.join("\n");
+}
+
+const MAX_POSSIBLE_SHOWN = 15;
+
+/** Call sites that may reach a changed method, kept apart from what is known to. */
+function possibleLines(possible: Possible): string[] {
+  const lines: string[] = [];
+  if (possible.callers.length > 0) {
+    lines.push("", `possibly affected (${possible.callers.length}): these call a method of the same name on a value whose type the graph cannot tell`);
+    for (const item of possible.callers.slice(0, MAX_POSSIBLE_SHOWN)) lines.push(`  ${item.node.id}  [line ${item.line}, maybe ${item.of}]`);
+    if (possible.callers.length > MAX_POSSIBLE_SHOWN) lines.push(`  and ${possible.callers.length - MAX_POSSIBLE_SHOWN} more (all of them with --json)`);
+  }
+  if (possible.common.length > 0) {
+    lines.push("", "not listed: these names are called on values of unknown type in too many places to tell which method is meant");
+    for (const item of possible.common) lines.push(`  ${item.name}  ${item.callers} places  (${item.of})`);
+  }
+  return lines;
 }
 
 /** The affected nodes grouped by how many steps they are from what changed, each group after an empty line. */
@@ -62,8 +80,8 @@ function affectedLines(result: Pick<ImpactResult, "affected" | "truncatedAtDepth
 
 export function renderImpact(result: ImpactResult): string {
   const title = `Impact of changing ${result.target.id}`;
-  if (result.affected.length === 0) return `${title}\n  Nothing in the index depends on it.`;
-  return [title, ...affectedLines(result)].join("\n");
+  if (result.affected.length === 0) return [title, result.possible.callers.length + result.possible.common.length === 0 ? "  Nothing in the index depends on it." : "  Nothing in the index is known to depend on it.", ...possibleLines(result.possible)].join("\n");
+  return [title, ...affectedLines(result), ...possibleLines(result.possible)].join("\n");
 }
 
 export function renderChanges(result: ChangesResult): string {
@@ -88,8 +106,11 @@ export function renderChanges(result: ChangesResult): string {
     for (const item of result.broken) lines.push(`  ${item.file}:${item.line}  ${item.specifier}  (was ${item.gone})`);
   }
 
-  if (result.affected.length === 0) lines.push("", "Nothing else in the index depends on what changed.");
+  const unsure = result.possible.callers.length + result.possible.common.length > 0;
+  if (result.affected.length === 0) lines.push("", unsure ? "Nothing else in the index is known to depend on what changed." : "Nothing else in the index depends on what changed.");
   else lines.push("", `affected (${result.affected.length})`, ...affectedLines(result).slice(1).map((line) => (line ? `  ${line}` : line)));
+
+  lines.push(...possibleLines(result.possible));
 
   const list = (title: string, nodes: GraphNode[]): void => {
     if (nodes.length === 0) return;

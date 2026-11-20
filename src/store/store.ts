@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, hash TEXT NOT NULL, size INTEGER NOT NULL, mtime_ms REAL NOT NULL, facts TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, file TEXT, line INTEGER, detail TEXT);
 CREATE TABLE IF NOT EXISTS edges (src TEXT NOT NULL, dst TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER, PRIMARY KEY (src, dst, kind)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS unbound (name TEXT NOT NULL, src TEXT NOT NULL, line INTEGER NOT NULL, PRIMARY KEY (name, src)) WITHOUT ROWID;
 `;
 
 export interface FileState {
@@ -104,6 +105,17 @@ export class Store {
     for (const node of nodes) insertNode.run(node.id, node.kind, node.name, node.file, node.line, node.detail);
     const insertEdge = this.db.prepare("INSERT INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)");
     for (const edge of edges) insertEdge.run(edge.src, edge.dst, edge.kind, edge.line);
+  }
+
+  /** Replaces the calls that could not be bound, kept by the method name they use. */
+  replaceUnbound(calls: { name: string; src: string; line: number }[]): void {
+    this.db.exec("DELETE FROM unbound;");
+    const insert = this.db.prepare("INSERT OR IGNORE INTO unbound (name, src, line) VALUES (?, ?, ?)");
+    for (const call of calls) insert.run(call.name, call.src, call.line);
+  }
+
+  unboundCalls(name: string): { name: string; src: string; line: number }[] {
+    return this.db.prepare("SELECT name, src, line FROM unbound WHERE name = ? ORDER BY src").all(name) as { name: string; src: string; line: number }[];
   }
 
   loadGraph(): Graph {

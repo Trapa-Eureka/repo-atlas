@@ -32,6 +32,11 @@ const META_ALIASES = "aliases";
 const META_SUMMARY = "summary";
 const META_UNRESOLVED = "unresolved";
 
+/** Whether the stored index was built by this version. One that was not lacks what newer queries read, and has to be rebuilt before it is answered from. */
+export function isCurrent(store: Store): boolean {
+  return store.getMeta(META_VERSION) === String(EXTRACTOR_VERSION);
+}
+
 export function lastSummary(store: Store): IndexSummary | null {
   const raw = store.getMeta(META_SUMMARY);
   return raw ? (JSON.parse(raw) as IndexSummary) : null;
@@ -121,6 +126,7 @@ export async function indexRepository(root: string, store: Store, options: Index
     if (changed) {
       const linked = link(store.allFacts(), { aliases });
       store.replaceGraph(linked.nodes, linked.edges);
+      store.replaceUnbound(linked.unbound);
       store.setMeta(META_UNRESOLVED, JSON.stringify(linked.unresolved));
       store.setMeta(META_ALIASES, aliasesJson);
       store.setMeta(META_VERSION, String(EXTRACTOR_VERSION));
