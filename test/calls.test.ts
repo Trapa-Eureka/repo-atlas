@@ -63,6 +63,62 @@ describe("calls under another name", () => {
   });
 });
 
+describe("edges the linker infers", () => {
+  const inferred = async (files: Record<string, string>, options: LinkOptions = {}) => {
+    const facts = await Promise.all(Object.entries(files).map(([path, source]) => extractFile(path, source)));
+    return link(facts, options).edges.filter((edge) => edge.kind !== "defines").map((edge) => `${short(edge.src)} -${edge.kind}-> ${short(edge.dst)}${edge.inferred ? " ?" : ""}`).sort();
+  };
+
+  it("marks a Ruby call read from a value's name and a table a model has by its name, and nothing a file states", async () => {
+    expect(
+      await inferred({
+        "db/schema.rb": 'ActiveRecord::Schema.define do\n  create_table "accounts" do |t|\n  end\nend\n',
+        "app/models/account.rb": "class Account < ApplicationRecord\n  def keypair\n  end\n  def name\n  end\nend\n",
+        "app/services/sign.rb": "class Sign\n  def call(account)\n    account.keypair\n  end\n  def both(account)\n    account.name\n    Account.new.name\n  end\nend\n",
+        // The class is written by name here, so the file refers to it whatever the rule makes of `account.keypair`.
+        "app/services/check.rb": "class Check\n  def call(account)\n    raise unless account.is_a?(Account)\n    account.keypair\n  end\nend\n",
+      }),
+    ).toEqual([
+      "app/models/account.rb -reads_table-> table:accounts ?",
+      "app/services/check.rb -imports-> app/models/account.rb",
+      "app/services/check.rb -references-> app/models/account.rb#Account",
+      "app/services/check.rb#Check.call -calls-> app/models/account.rb#Account.keypair ?",
+      "app/services/sign.rb -imports-> app/models/account.rb",
+      "app/services/sign.rb#Sign.both -calls-> app/models/account.rb#Account",
+      // Stated once in the same method, so it no longer rests on the name alone.
+      "app/services/sign.rb#Sign.both -calls-> app/models/account.rb#Account.name",
+      "app/services/sign.rb#Sign.call -calls-> app/models/account.rb#Account.keypair ?",
+      "db/schema.rb -defines_table-> table:accounts",
+    ]);
+  });
+
+  it("marks the files of a Go package taken whole because what is used could not be placed", async () => {
+    const goModule: LinkOptions = { aliases: [{ scope: "", prefix: "example.com/shop/", exact: false, targets: [""], language: "go" }] };
+    const edges = await inferred(
+      {
+        "store/a.go": "package store\n\nfunc Open() {}\n",
+        "store/b.go": "package store\n\nfunc Close() {}\n",
+        "cmd/known.go": 'package main\n\nimport "example.com/shop/store"\n\nfunc known() {\n\tstore.Open()\n}\n',
+        "cmd/unknown.go": 'package main\n\nimport "example.com/shop/store"\n\nfunc unknown() {\n\tstore.Generated()\n}\n',
+        // Open is in a.go for sure; Generated is somewhere, so b.go stands in for it.
+        "cmd/mixed.go": 'package main\n\nimport "example.com/shop/store"\n\nfunc mixed() {\n\tstore.Open()\n\tstore.Generated()\n}\n',
+        // Uses no name: the package as a whole, and that is what the file says.
+        "cmd/blank.go": 'package main\n\nimport _ "example.com/shop/store"\n',
+      },
+      goModule,
+    );
+    expect(edges.filter((edge) => edge.includes("-imports->"))).toEqual([
+      "cmd/blank.go -imports-> store/a.go",
+      "cmd/blank.go -imports-> store/b.go",
+      "cmd/known.go -imports-> store/a.go",
+      "cmd/mixed.go -imports-> store/a.go",
+      "cmd/mixed.go -imports-> store/b.go ?",
+      "cmd/unknown.go -imports-> store/a.go ?",
+      "cmd/unknown.go -imports-> store/b.go ?",
+    ]);
+  });
+});
+
 describe("names used without a call", () => {
   const references = (files: Record<string, string>, options: LinkOptions = {}) => edgesOf("references", files, options);
   const goModule: LinkOptions = { aliases: [{ scope: "", prefix: "example.com/shop", exact: true, targets: [""], language: "go" }, { scope: "", prefix: "example.com/shop/", exact: false, targets: [""], language: "go" }] };

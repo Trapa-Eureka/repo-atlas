@@ -152,6 +152,30 @@ describe("Atlas on the sample repository", () => {
     atlas.close();
   });
 
+  it("keeps the inferred mark in the index, and reads an index made before there was one", async () => {
+    mkdirSync(join(root, "app/models"), { recursive: true });
+    writeFileSync(join(root, "app/models/account.rb"), "class Account\n  def keypair\n  end\nend\n");
+    writeFileSync(join(root, "app/sign.rb"), "def sign(account)\n  account.keypair\nend\n");
+    const atlas = await Atlas.open(root);
+    expect(atlas.stats().inferred).toBe(1);
+    expect(atlas.impact("Account.keypair").affected.map((entry) => [entry.node.id, entry.inferred])).toEqual([["sym:app/sign.rb#sign", true], ["file:app/sign.rb", true]]);
+    expect(relation(atlas.context("Account.keypair"), "called by")).toEqual(["sym:app/sign.rb#sign"]);
+    expect(atlas.context("Account.keypair").relations.find((item) => item.relation === "called by")?.nodes[0]?.inferred).toBe(true);
+    atlas.close();
+
+    const old = mkdtempSync(join(tmpdir(), "atlas-old-"));
+    mkdirSync(join(old, ".atlas"));
+    const db = new DatabaseSync(join(old, ".atlas/graph.db"));
+    db.exec("CREATE TABLE edges (src TEXT NOT NULL, dst TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER, PRIMARY KEY (src, dst, kind)) WITHOUT ROWID");
+    db.close();
+    writeFileSync(join(old, "account.rb"), "class Account\n  def keypair\n  end\nend\n");
+    writeFileSync(join(old, "sign.rb"), "def sign(account)\n  account.keypair\nend\n");
+    const opened = await Atlas.open(old);
+    expect(opened.stats()).toMatchObject({ inferred: 1, nodes: { file: 2, symbol: 3 } });
+    opened.close();
+    rmSync(old, { recursive: true, force: true });
+  });
+
   it("rebuilds an index left by another version even when told not to refresh", async () => {
     (await Atlas.open(root)).close();
     const db = new DatabaseSync(join(root, ".atlas/graph.db"));

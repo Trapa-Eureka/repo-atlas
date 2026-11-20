@@ -13,6 +13,8 @@ export interface ImpactEntry {
   /** The edge that pulled this node in: `node -[via]-> through`. `contains` marks the file that holds an affected symbol. */
   via: EdgeKind | "contains";
   through: string;
+  /** Reached only by way of an edge the graph inferred. Without that edge the node would not be here. */
+  inferred?: true;
 }
 
 /** A call of a method name on a value whose type the graph could not tell. */
@@ -68,14 +70,8 @@ export function seedsOf(graph: Graph, target: GraphNode): string[] {
   return [...seeds];
 }
 
-/**
- * Reverse reachability over dependency edges from a set of changed nodes. Symbol-level paths stay
- * precise (callers of callers). A file reached through an import is followed to its own importers,
- * because which of its symbols are affected is unknown. A doc that mentions an affected node is
- * reported but not followed: docs citing that doc are not affected. Nor is a file that names a
- * changed symbol without calling it (`references`): it is affected, its importers are not known to be.
- */
-export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infinity): { affected: ImpactEntry[]; truncated: boolean } {
+/** One pass of reverse reachability over the dependency edges that `allow` lets through. */
+function walk(graph: Graph, seeds: readonly string[], maxDepth: number, allow: (inferred: boolean) => boolean): { affected: ImpactEntry[]; truncated: boolean; skipped: boolean } {
   const visited = new Set(seeds);
   // Reached only by naming a changed symbol: reported, and followed only if something stronger reaches it too.
   const named = new Set<string>();
@@ -83,6 +79,7 @@ export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infini
   let frontier = [...seeds];
   let distance = 0;
   let truncated = false;
+  let sawInferred = false;
 
   while (frontier.length > 0) {
     if (distance >= maxDepth) {
@@ -93,6 +90,8 @@ export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infini
     const next: string[] = [];
     for (const id of frontier) {
       for (const edge of graph.in(id, DEPENDENCY_KINDS)) {
+        if (edge.inferred) sawInferred = true;
+        if (!allow(edge.inferred === true)) continue;
         if (visited.has(edge.src)) {
           // Listed for naming a symbol, and now an import or a call reaches it as well: follow it after all.
           if (edge.kind !== "references" && named.delete(edge.src)) next.push(edge.src);
@@ -120,7 +119,25 @@ export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infini
     }
     frontier = next;
   }
-  return { affected, truncated };
+  return { affected, truncated, skipped: sawInferred };
+}
+
+/**
+ * Reverse reachability over dependency edges from a set of changed nodes. Symbol-level paths stay
+ * precise (callers of callers). A file reached through an import is followed to its own importers,
+ * because which of its symbols are affected is unknown. A doc that mentions an affected node is
+ * reported but not followed: docs citing that doc are not affected. Nor is a file that names a
+ * changed symbol without calling it (`references`): it is affected, its importers are not known to be.
+ * A node that is reached only by way of an inferred edge is marked: without that edge it would not be listed.
+ */
+export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infinity): { affected: ImpactEntry[]; truncated: boolean } {
+  const all = walk(graph, seeds, maxDepth, () => true);
+  if (all.skipped) {
+    // Without a depth limit: a stated path may be longer than the inferred one that was found first.
+    const stated = new Set(walk(graph, seeds, Infinity, (inferred) => !inferred).affected.map((entry) => entry.node.id));
+    for (const entry of all.affected) if (!stated.has(entry.node.id)) entry.inferred = true;
+  }
+  return { affected: all.affected, truncated: all.truncated };
 }
 
 /** The language of the file a node is in, with TypeScript and JavaScript as one. */

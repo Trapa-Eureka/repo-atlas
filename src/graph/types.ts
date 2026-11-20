@@ -29,6 +29,8 @@ export interface GraphEdge {
   dst: string;
   kind: EdgeKind;
   line: number | null;
+  /** Set when the edge was worked out by a rule that can be wrong, not read from what a file states: a Ruby value taken for a class by its name, a table a model has by its name alone, a Go package whose used file could not be told. */
+  inferred?: true;
 }
 
 export const fileId = (path: string): string => `file:${path}`;

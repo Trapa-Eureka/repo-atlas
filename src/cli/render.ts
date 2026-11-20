@@ -36,7 +36,7 @@ export function renderContext(result: ContextResult): string {
   const lines = [nodeLine(result.target), ""];
   for (const relation of result.relations) {
     lines.push(`${relation.relation} (${relation.nodes.length})`);
-    for (const node of relation.nodes) lines.push(`  ${node.id}${node.at ? `  line ${node.at}` : ""}`);
+    for (const node of relation.nodes) lines.push(`  ${node.id}${node.at ? `  line ${node.at}` : ""}${node.inferred ? "  (inferred)" : ""}`);
     lines.push("");
   }
   if (result.relations.length === 0) lines.push("No relations recorded for this node.", "");
@@ -71,9 +71,10 @@ function affectedLines(result: Pick<ImpactResult, "affected" | "truncatedAtDepth
   for (const [distance, entries] of [...byDistance].sort((a, b) => a[0] - b[0])) {
     lines.push("", distance === 1 ? `direct (${entries.length})` : `${distance} steps away (${entries.length})`);
     for (const entry of entries.sort((a, b) => (a.node.id < b.node.id ? -1 : 1))) {
-      lines.push(`  ${entry.node.id}  [${entry.via} ${entry.through}]`);
+      lines.push(`  ${entry.node.id}  [${entry.via} ${entry.through}]${entry.inferred ? "  (inferred)" : ""}`);
     }
   }
+  if (result.affected.some((entry) => entry.inferred)) lines.push("", "(inferred): listed only by way of an edge the graph worked out by a rule that can be wrong, not one a file states.");
   if (result.truncatedAtDepth !== null) lines.push("", `Stopped at depth ${result.truncatedAtDepth}; more nodes are affected further out.`);
   return lines;
 }
@@ -127,7 +128,7 @@ export function renderPath(result: PathResult): string {
   if (result.direction === null) return `No path between ${result.from.id} and ${result.to.id}.`;
   const first = result.steps[0]?.src ?? result.from.id;
   const lines = [result.direction === "forward" ? first : `(reverse direction: ${result.to.id} leads to ${result.from.id})\n${first}`];
-  for (const step of result.steps) lines.push(`  -[${step.kind}]-> ${step.dst}`);
+  for (const step of result.steps) lines.push(`  -[${step.kind}]-> ${step.dst}${step.inferred ? "  (inferred)" : ""}`);
   return lines.join("\n");
 }
 
@@ -136,7 +137,7 @@ export function renderStats(result: StatsResult & { unresolvedImports: Unresolve
     Object.entries(record)
       .filter(([, count]) => count > 0)
       .map(([name, count]) => `  ${name.padEnd(14)} ${count}`);
-  const lines = ["nodes", ...table(result.nodes), "", "edges", ...table(result.edges), "", "files by language", ...table(result.languages)];
+  const lines = ["nodes", ...table(result.nodes), "", "edges", ...table(result.edges), ...(result.inferred > 0 ? [`  of which inferred ${result.inferred}`] : []), "", "files by language", ...table(result.languages)];
   if (result.hubs.length > 0) {
     lines.push("", "most depended-on files");
     for (const hub of result.hubs) lines.push(`  ${String(hub.dependents).padStart(4)}  ${hub.name}`);

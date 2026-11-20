@@ -39,6 +39,9 @@ export class Store {
     const db = new DatabaseSync(join(folder, DATABASE_FILE));
     db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
     db.exec(SCHEMA);
+    // An index made before edges could be marked as inferred has no column for it. It is added empty; the next index fills it.
+    const columns = db.prepare("PRAGMA table_info(edges)").all() as { name: string }[];
+    if (!columns.some((column) => column.name === "inferred")) db.exec("ALTER TABLE edges ADD COLUMN inferred INTEGER NOT NULL DEFAULT 0");
     return new Store(db);
   }
 
@@ -103,8 +106,8 @@ export class Store {
     this.db.exec("DELETE FROM edges; DELETE FROM nodes;");
     const insertNode = this.db.prepare("INSERT INTO nodes (id, kind, name, file, line, detail) VALUES (?, ?, ?, ?, ?, ?)");
     for (const node of nodes) insertNode.run(node.id, node.kind, node.name, node.file, node.line, node.detail);
-    const insertEdge = this.db.prepare("INSERT INTO edges (src, dst, kind, line) VALUES (?, ?, ?, ?)");
-    for (const edge of edges) insertEdge.run(edge.src, edge.dst, edge.kind, edge.line);
+    const insertEdge = this.db.prepare("INSERT INTO edges (src, dst, kind, line, inferred) VALUES (?, ?, ?, ?, ?)");
+    for (const edge of edges) insertEdge.run(edge.src, edge.dst, edge.kind, edge.line, edge.inferred ? 1 : 0);
   }
 
   /** Replaces the calls that could not be bound, kept by the method name they use. */
@@ -120,7 +123,10 @@ export class Store {
 
   loadGraph(): Graph {
     const nodes = this.db.prepare("SELECT id, kind, name, file, line, detail FROM nodes ORDER BY id").all() as unknown as GraphNode[];
-    const edges = this.db.prepare("SELECT src, dst, kind, line FROM edges ORDER BY src, dst, kind").all() as unknown as GraphEdge[];
-    return new Graph(nodes.map((node) => ({ ...node })), edges.map((edge) => ({ ...edge })));
+    const edges = this.db.prepare("SELECT src, dst, kind, line, inferred FROM edges ORDER BY src, dst, kind").all() as unknown as (Omit<GraphEdge, "inferred"> & { inferred: number })[];
+    return new Graph(
+      nodes.map((node) => ({ ...node })),
+      edges.map(({ inferred, ...edge }) => (inferred ? { ...edge, inferred: true as const } : { ...edge })),
+    );
   }
 }

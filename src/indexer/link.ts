@@ -143,6 +143,8 @@ class Linker {
   private readonly symbolsByShortName = new Map<string, string[]>();
   private readonly resolvedImports = new Map<string, Map<ImportFact, string>>();
   private readonly outsideCache = new Map<string, Set<string>>();
+  /** Whether the call being linked was settled by the Ruby naming rule. */
+  private byRule = false;
   /** File and symbol → where the file names that symbol of another file. */
   private readonly named = new Map<string, { file: string; symbol: string; line: number }>();
   private readonly pythonSuffixCache = new Map<string, string | null>();
@@ -269,7 +271,8 @@ class Linker {
   private addReferences(): void {
     const called = new Set<string>();
     for (const edge of this.edges.values()) {
-      if (edge.kind !== "calls") continue;
+      // A call that rests on a rule does not stand in for the name the file writes.
+      if (edge.kind !== "calls" || edge.inferred) continue;
       const file = this.nodes.get(edge.src)?.file;
       if (!file) continue;
       called.add(`${file}\u0000${edge.dst}`);
@@ -287,10 +290,13 @@ class Linker {
     return node.id;
   }
 
-  private edge(src: string, dst: string, kind: EdgeKind, line: number | null): void {
+  private edge(src: string, dst: string, kind: EdgeKind, line: number | null, inferred = false): void {
     if (src === dst) return;
     const key = `${src}\u0000${dst}\u0000${kind}`;
-    if (!this.edges.has(key)) this.edges.set(key, { src, dst, kind, line });
+    const existing = this.edges.get(key);
+    if (!existing) this.edges.set(key, inferred ? { src, dst, kind, line, inferred: true } : { src, dst, kind, line });
+    // Stated somewhere else in the same file: the edge no longer rests on the rule alone.
+    else if (!inferred) delete existing.inferred;
   }
 
   private addFileAndSymbols(facts: FileFacts): void {
@@ -409,7 +415,11 @@ class Linker {
         const own = this.symbols.get(file.path);
         return members.some((member) => this.goDeclares(file, member) || [...(own?.keys() ?? [])].some((name) => name.startsWith(`${member}.`)));
       });
-      for (const file of placed && used.length > 0 ? used : files) this.edge(from, fileId(file.path), "imports", fact.line);
+      // When something used cannot be placed in a file, every file of the package is taken. The files that declare
+      // what could be placed are imported for sure; the rest stand in for the one that could not be told.
+      // An import that uses no name (`import _ "pkg"`) is of the package as a whole, and states that.
+      const told = placed && used.length > 0;
+      for (const file of told ? used : files) this.edge(from, fileId(file.path), "imports", fact.line, !told && members.length > 0 && !used.includes(file));
       for (const member of members) this.refer(facts, this.goSymbol(folder, member, null), fact.line);
     }
   }
@@ -763,7 +773,9 @@ class Linker {
     // when there is such a class and it has such a method. A name the file gave another value to is left alone,
     // and so is a name that would be the class it is written in: `@cache` inside `Cache` is what the class wraps.
     const named = this.rubyNamed(facts, name.replace(/^@/, ""), call.line);
-    return named && named.name !== ownerName ? this.rubyMethod(named, call.callee) : null;
+    const found = named && named.name !== ownerName ? this.rubyMethod(named, call.callee) : null;
+    this.byRule = found !== null;
+    return found;
   }
 
   /** Whether one of the names a Ruby class is nested in is a class, not a module. */
@@ -1342,6 +1354,7 @@ class Linker {
     for (const call of facts.calls) {
       const caller = this.enclosing(facts, call.line);
       let target: string | null = null;
+      this.byRule = false;
 
       if (facts.language === "go") {
         target = this.goCall(facts, call);
@@ -1356,7 +1369,7 @@ class Linker {
       }
 
       const src = caller ? symbolId(facts.path, caller.name) : fileId(facts.path);
-      if (target) this.edge(src, target, "calls", call.line);
+      if (target) this.edge(src, target, "calls", call.line, this.byRule);
       else if (this.methodNames.has(`${family(facts.language)}:${call.callee}`) && this.unknownValue(facts, call)) {
         const key = `${call.callee}\u0000${src}`;
         if (!this.unbound.has(key)) this.unbound.set(key, { name: call.callee, src, line: call.line });
@@ -1426,7 +1439,7 @@ class Linker {
       if (name === null) continue;
       const id = this.node({ id: tableId(name), kind: "table", name, file: null, line: null, detail: null });
       const kind = table.op === "define" ? "defines_table" : table.op === "write" ? "writes_table" : "reads_table";
-      this.edge(from, id, kind, table.line);
+      this.edge(from, id, kind, table.line, table.inferred === true);
       const node = this.nodes.get(id);
       if (table.op === "define" && node && !node.file) {
         node.file = facts.path;

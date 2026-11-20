@@ -8,6 +8,8 @@ export interface StatsResult {
   languages: Record<string, number>;
   /** Files most other files depend on: the riskiest ones to change. */
   hubs: { id: string; name: string; dependents: number }[];
+  /** Edges worked out by a rule that can be wrong, not read from what a file states. */
+  inferred: number;
 }
 
 export function stats(graph: Graph, hubCount = 10): StatsResult {
@@ -24,8 +26,12 @@ export function stats(graph: Graph, hubCount = 10): StatsResult {
     const dependents = new Set(graph.in(node.id, DEPENDENCY_KINDS).map((edge) => edge.src)).size;
     if (dependents > 0) hubs.push({ id: node.id, name: node.name, dependents });
   }
-  for (const edge of graph.edges) edges[edge.kind]++;
+  let inferred = 0;
+  for (const edge of graph.edges) {
+    edges[edge.kind]++;
+    if (edge.inferred) inferred++;
+  }
   hubs.sort((a, b) => b.dependents - a.dependents || (a.id < b.id ? -1 : 1));
 
-  return { nodes, edges, languages, hubs: hubs.slice(0, hubCount) };
+  return { nodes, edges, languages, hubs: hubs.slice(0, hubCount), inferred };
 }

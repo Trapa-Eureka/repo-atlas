@@ -5,7 +5,8 @@ import { impact, seedsOf, type UnboundCall } from "./impact.js";
 export interface Relation {
   /** How the target relates to the other node, read as "target <relation> node". */
   relation: string;
-  nodes: { id: string; kind: string; name: string; file: string | null; line: number | null; at: number | null }[];
+  /** `inferred`: the relation rests on a rule that can be wrong, not on what a file states. */
+  nodes: { id: string; kind: string; name: string; file: string | null; line: number | null; at: number | null; inferred?: true }[];
 }
 
 export interface ContextResult {
@@ -45,8 +46,14 @@ function collect(graph: Graph, edges: readonly GraphEdge[], pick: (edge: GraphEd
   const seen = new Map<string, Relation["nodes"][number]>();
   for (const edge of edges) {
     const node = graph.node(pick(edge));
-    if (!node || inside.has(node.id) || seen.has(node.id)) continue;
-    seen.set(node.id, { id: node.id, kind: node.kind, name: node.name, file: node.file, line: node.line, at: edge.line });
+    if (!node || inside.has(node.id)) continue;
+    const before = seen.get(node.id);
+    // Inferred only while every edge to the node is.
+    if (before) {
+      if (!edge.inferred) delete before.inferred;
+      continue;
+    }
+    seen.set(node.id, { id: node.id, kind: node.kind, name: node.name, file: node.file, line: node.line, at: edge.line, ...(edge.inferred ? { inferred: true as const } : {}) });
   }
   return [...seen.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
 }

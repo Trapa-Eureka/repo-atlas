@@ -46,6 +46,29 @@ describe("possibleCallers", () => {
   });
 });
 
+describe("impact by way of an inferred edge", () => {
+  const fn = (name: string) => ({ id: `sym:a.rb#${name}`, kind: "symbol" as const, name, file: "a.rb", line: 1, detail: "method" });
+  const calls = (src: string, dst: string, inferred = false) => ({ src: `sym:a.rb#${src}`, dst: `sym:a.rb#${dst}`, kind: "calls" as const, line: 1, ...(inferred ? { inferred: true as const } : {}) });
+  // guess -?-> target, above -> guess; sure -> target, both -> sure and both -?-> target.
+  const graph = new Graph(
+    ["target", "guess", "above", "sure", "both"].map(fn),
+    [calls("guess", "target", true), calls("above", "guess"), calls("sure", "target"), calls("both", "sure"), calls("both", "target", true)],
+  );
+
+  it("marks what would not be listed without that edge, and what is reached through it", () => {
+    const target = graph.node("sym:a.rb#target");
+    const result = target ? impact(graph, target) : null;
+    expect(Object.fromEntries((result?.affected ?? []).map((entry) => [entry.node.name, entry.inferred === true]))).toEqual({ guess: true, above: true, sure: false, both: false });
+  });
+
+  it("does not let a depth limit hide the stated way round", () => {
+    const target = graph.node("sym:a.rb#target");
+    // both is one inferred step away and two stated steps away: asked for one step, it is still not a guess.
+    const result = target ? impact(graph, target, 1) : null;
+    expect(Object.fromEntries((result?.affected ?? []).map((entry) => [entry.node.name, entry.inferred === true]))).toEqual({ guess: true, sure: false, both: false });
+  });
+});
+
 describe("impact through a name used without a call", () => {
   const file = (path: string) => ({ id: `file:${path}`, kind: "file" as const, name: path, file: path, line: null, detail: "typescript" });
   const parse = { id: "sym:store.ts#parse", kind: "symbol" as const, name: "parse", file: "store.ts", line: 1, detail: "function" };
