@@ -49,10 +49,10 @@ Against pyright (pyright 1.1.414, calls listed by Python 3.9.6).
 
 | Repository | Commit | Files | Imports | Calls | Calls to symbols |
 | --- | --- | ---: | ---: | ---: | ---: |
-| [flask](https://github.com/pallets/flask) | `49943b5` | 83 | 141 / 185 (76.2%) | 192 / 497 (38.6%) | 192 / 445 (43.1%) |
-| [httpx](https://github.com/encode/httpx) | `7cff5f7` | 60 | 123 / 123 (100.0%) | 283 / 595 (47.6%) | 283 / 555 (51.0%) |
-| [datasette](https://github.com/simonw/datasette) | `c397483` | 189 | 652 / 652 (100.0%) | 1,687 / 2,082 (81.0%) | 1,687 / 1,894 (89.1%) |
+| [flask](https://github.com/pallets/flask) | `49943b5` | 83 | 184 / 185 (99.5%) | 392 / 497 (78.9%) | 392 / 445 (88.1%) |
+| [httpx](https://github.com/encode/httpx) | `7cff5f7` | 60 | 123 / 123 (100.0%) | 529 / 595 (88.9%) | 529 / 555 (95.3%) |
+| [datasette](https://github.com/simonw/datasette) | `c397483` | 189 | 652 / 652 (100.0%) | 1,785 / 2,082 (85.7%) | 1,785 / 1,894 (94.2%) |
 | [full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) | `77e550a` | 43 | 85 / 85 (100.0%) | 91 / 91 (100.0%) | 91 / 91 (100.0%) |
-| **All** | | 375 | 1,001 / 1,045 (95.8%) | **2,253 / 3,265 (69.0%)** | 2,253 / 2,985 (75.5%) |
+| **All** | | 375 | 1,044 / 1,045 (99.9%) | **2,797 / 3,265 (85.7%)** | 2,797 / 2,985 (93.7%) |
 
 Rust and Ruby have no such measurement: a compiler's answer for Rust needs the dependencies built, and Ruby has no checker that resolves calls without type signatures. The README gives hand-read samples for both.

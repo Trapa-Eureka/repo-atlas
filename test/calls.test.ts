@@ -414,6 +414,98 @@ describe("what a call returns, in TypeScript, JavaScript and Python", () => {
     expect(await from("from shop.store import Store\n\nclass App:\n    def __init__(self):\n        self.store = Store()\n\n    def swap(self, pair):\n        self.store, self.other = pair\n\n    def run(self):\n        self.store.first()\n")).toEqual(["store.py#Store"]);
   });
 
+  it("follows a Python name through the package that passes it on, also one kept under src/ and one written with its module", async () => {
+    const found = await calls({
+      "src/pkg/__init__.py": "from ._client import Client\nfrom ._api import *\nfrom . import tools\n",
+      "src/pkg/_client.py":
+        'class Base:\n    def close(self):\n        pass\n\n\nclass Client(Base):\n    def get(self) -> "Reply":\n        return Reply()\n\n    def __enter__(self):\n        return self\n\n\nclass Reply:\n    def read(self):\n        pass\n',
+      "src/pkg/_api.py": "def get():\n    pass\n",
+      "src/pkg/tools.py": "def run():\n    pass\n",
+      // A module of the same name inside another package is not what `import pkg` finds.
+      "tests/apps/inner/__init__.py": "",
+      "tests/apps/inner/pkg.py": "def get():\n    pass\n",
+      "tests/test_a.py":
+        "import pkg\nfrom pkg import Client\n\n\nclass Mine(pkg.Client):\n    def go(self):\n        self.close()\n\n\ndef test(c: pkg.Client, d: Client | None):\n    pkg.get()\n    pkg.tools.run()\n    Client()\n    c.close()\n    d.get()\n    with pkg.Client() as client:\n        client.get().read()\n    with open(c) as other:\n        other.read()\n",
+    });
+    expect(found.filter((edge) => edge.startsWith("tests/")).map((edge) => edge.replace(/^tests\/test_a\.py#/, "").replace(/src\/pkg\//, ""))).toEqual([
+      "Mine.go -> _client.py#Base.close",
+      "test -> _api.py#get",
+      "test -> _client.py#Base.close",
+      "test -> _client.py#Client",
+      "test -> _client.py#Client.get",
+      "test -> _client.py#Reply.read",
+      "test -> tools.py#run",
+    ]);
+  });
+
+  it("follows a Python field, a property, a variable of a module and super(), and keeps a call under the method that has the body", async () => {
+    const found = await calls({
+      "shop/core.py":
+        "from typing import overload\n\n\nclass Config:\n    def load(self):\n        pass\n\n\nclass Urls:\n    def path(self):\n        pass\n\n\nclass Base:\n    def __init__(self):\n        pass\n\n    def stop(self):\n        pass\n\n\nclass App(Base):\n    def __init__(self):\n        super().__init__()\n        self.config = Config()\n\n    @property\n    def urls(self):\n        return Urls(self)\n\n    def maybe(self, flag):\n        if flag:\n            return Urls(self)\n        return None\n\n    @overload\n    def add(self, x: int) -> int: ...\n    @overload\n    def add(self, x: str) -> str: ...\n    def add(self, x):\n        self.stop()\n        return x\n\n    def run(self):\n        self.urls.path()\n        self.maybe(1).path()\n\n\ncurrent: App = make()\ntwice = App()\ntwice = None\n",
+      "shop/use.py": "import shop.core\nfrom shop.core import App, current, twice\n\n\ndef go(app: App, other):\n    app.config.load()\n    app.urls.path()\n    current.stop()\n    shop.core.current.config.load()\n    twice.stop()\n    other.config.load()\n",
+    });
+    expect(found.map((edge) => edge.replace(/shop\/(?:core|use)\.py#/g, "")).sort()).toEqual([
+      "App.__init__ -> Base.__init__",
+      "App.__init__ -> Config",
+      "App.add -> Base.stop",
+      "App.maybe -> Urls",
+      "App.run -> App.maybe",
+      "App.run -> Urls.path",
+      "App.urls -> Urls",
+      "go -> Base.stop",
+      "go -> Config.load",
+      "go -> Urls.path",
+      "shop/core.py -> App",
+    ]);
+  });
+
+  it("does not guess in Python where what is written leaves it open", async () => {
+    const from = async (files: Record<string, string>) => (await calls(files)).filter((edge) => edge.startsWith("use.py")).map((edge) => edge.replace(/^use\.py#/, ""));
+
+    // `with`: only what `__enter__` says. Its own class by `return self`, `Self` or the type of `self`; another class; nothing where it cannot be read.
+    const db =
+      "import typing as t\n\nT = t.TypeVar('T')\n\n\nclass Conn:\n    def close(self):\n        pass\n\n\nclass Plain:\n    def __enter__(self):\n        return self\n\n    def close(self):\n        pass\n\n\nclass Typed:\n    def __enter__(self: T) -> T:\n        return self\n\n    def close(self):\n        pass\n\n\nclass Gives:\n    def __enter__(self) -> Conn:\n        return self.conn\n\n    def close(self):\n        pass\n\n\nclass Pool:\n    def __enter__(self):\n        return self.conn\n\n    def close(self):\n        pass\n\n\nclass Pair:\n    def __enter__(self) -> t.Tuple[Conn, Conn]:\n        return self.pair\n\n    def close(self):\n        pass\n\n\nclass Later:\n    async def __aenter__(self):\n        return self\n\n    def __enter__(self) -> Conn:\n        return self.conn\n\n    def close(self):\n        pass\n\n\nclass Bare:\n    def close(self):\n        pass\n\n\ndef run():\n    pass\n";
+    const withs = (body: string) => from({ "db.py": db, "use.py": `from db import Plain, Typed, Gives, Pool, Pair, Later, Bare, run\n\n\n${body}` });
+    expect(await withs("def go():\n    with Plain() as a, Typed() as b, Gives() as c:\n        a.close()\n        b.close()\n        c.close()\n")).toEqual(["go -> db.py#Conn.close", "go -> db.py#Gives", "go -> db.py#Plain", "go -> db.py#Plain.close", "go -> db.py#Typed", "go -> db.py#Typed.close"]);
+    expect(await withs("def go():\n    with Pool() as a, Pair() as b, Bare() as c:\n        a.close()\n        b.close()\n        c.close()\n")).toEqual(["go -> db.py#Bare", "go -> db.py#Pair", "go -> db.py#Pool"]);
+    expect(await withs("async def go():\n    async with Later() as a:\n        a.close()\n    with Later() as b:\n        b.close()\n")).toEqual(["go -> db.py#Conn.close", "go -> db.py#Later", "go -> db.py#Later.close"]);
+    // The name a `with` binds hides a function of that name.
+    expect(await withs("def go():\n    with Plain() as run:\n        run()\n")).toEqual(["go -> db.py#Plain"]);
+
+    // A package: the last import of a name stays, a star passes on no underscore name, an import inside a function gives the module nothing.
+    const pkg = {
+      "pkg/__init__.py": "from .a import get\nfrom .b import get\nfrom .a import *\nfrom .b import *\n\n\ndef late():\n    from .c import inner\n",
+      "pkg/a.py": "def get():\n    pass\n\n\ndef put():\n    pass\n\n\ndef only_a():\n    pass\n\n\ndef _hidden():\n    pass\n",
+      "pkg/c.py": "def inner():\n    pass\n",
+      "pkg/b.py": "def get():\n    pass\n\n\ndef put():\n    pass\n",
+    };
+    expect(await from({ ...pkg, "use.py": "import pkg\nfrom pkg import put\n\n\ndef go():\n    pkg.get()\n    put()\n    pkg.only_a()\n    pkg._hidden()\n    pkg.inner()\n" })).toEqual(["go -> pkg/a.py#only_a", "go -> pkg/b.py#get", "go -> pkg/b.py#put"]);
+
+    // A variable of a module is followed only when it is given one thing.
+    const core = "class App:\n    def stop(self):\n        pass\n\n\nclass Fake:\n    def stop(self):\n        pass\n\n\nspare = Fake()\ncurrent = App()\ncurrent = spare\nlater = App()\nlater = None\nonce: App | None = None\n";
+    expect(await from({ "core.py": core, "use.py": "from core import current, later, once, spare\n\n\ndef go():\n    current.stop()\n    later.stop()\n" })).toEqual([]);
+    expect(await from({ "core.py": core, "use.py": "from core import once, spare\n\n\ndef go(spare):\n    once.stop()\n    spare.stop()\n" })).toEqual(["go -> core.py#App.stop"]);
+
+    // Parents in the order written, also for `super()`; a field one class cannot tell is not looked for further up.
+    const mix = {
+      "mix.py": "class Mixin:\n    def save(self):\n        pass\n\n\nclass Row:\n    def size(self):\n        pass\n",
+      "base.py": "from mix import Row\n\n\nclass Base:\n    def __init__(self, x):\n        self.row = Row()\n        self.kept = Row()\n\n    def save(self):\n        pass\n\n    def load(self):\n        pass\n",
+    };
+    expect(await from({ ...mix, "use.py": "import mix\nfrom base import Base\n\n\nclass Model(mix.Mixin, Base):\n    def __init__(self, x):\n        self.row = x\n\n    def save(self):\n        super().save()\n        super().load()\n        self.row.size()\n        self.kept.size()\n" })).toEqual(["Model.save -> base.py#Base.load", "Model.save -> mix.py#Mixin.save", "Model.save -> mix.py#Row.size"]);
+
+    // What a function makes is read from its own `return`s only, and a generator makes none.
+    const made = "class Row:\n    def size(self):\n        pass\n\n\ndef one():\n    def inner():\n        return 1\n    return Row()\n\n\ndef many():\n    yield Row()\n    return Row()\n\n\ndef either(flag):\n    if flag:\n        return Row()\n    return make()\n";
+    expect(await from({ "rows.py": made, "use.py": "from rows import one, many, either\n\n\ndef go():\n    one().size()\n    many().size()\n    either(1).size()\n" })).toEqual(["go -> rows.py#Row.size", "go -> rows.py#either", "go -> rows.py#many", "go -> rows.py#one"]);
+
+    // A module beside the importing file may be the one meant, so one elsewhere is not taken; a call in a class body stays with the class.
+    expect(
+      await edgesOf("imports", { "app/__init__.py": "", "app/utils.py": "def slug():\n    pass\n", "app/main.py": "import utils\n", "scripts/utils.py": "def slug():\n    pass\n", "other/run.py": "import utils\n" }),
+    ).toEqual(["app/main.py -> mod:utils", "other/run.py -> scripts/utils.py"]);
+    expect(
+      await calls({ "a.py": "def make():\n    pass\n\n\nclass C:\n    @property\n    def x(self):\n        return 1\n\n    helper = make()\n\n    @x.setter\n    def x(self, value):\n        pass\n" }),
+    ).toEqual(["a.py#C -> a.py#make"]);
+  });
+
   it("says nothing about what an overloaded or generator TypeScript function returns", async () => {
     // Only `one`, a field holding an arrow function that makes a Report, says what it gives.
     expect(

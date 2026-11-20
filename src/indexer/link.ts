@@ -150,6 +150,8 @@ class Linker {
   private readonly pythonSuffixCache = new Map<string, string | null>();
   private readonly submodules = new Map<string, Map<string, string>>();
   private readonly bindingCache = new Map<string, Map<string, Binding>>();
+  private readonly exportCache = new Map<string, string | null>();
+  private readonly valueCache = new Map<string, { facts: FileFacts; local: LocalFact } | null>();
   /** Class symbol id → where it is declared, to follow `extends`. */
   private readonly classes = new Map<string, { facts: FileFacts; symbol: SymbolFact }>();
   /** Go: folder → its files, non-test files first. A folder is a package. */
@@ -356,9 +358,15 @@ class Linker {
     if (direct) return { file: direct, local: true };
     if (!this.pythonSuffixCache.has(rest)) {
       const matches = [...this.byPath.keys()].filter((path) => path.endsWith(`/${rest}.py`) || path.endsWith(`/${rest}/__init__.py`));
-      this.pythonSuffixCache.set(rest, matches.length === 1 ? (matches[0] ?? null) : null);
+      // Of several, the one that can be imported by this name: a folder that is a package itself (it has an
+      // `__init__.py`) is not where a bare name is looked up, so `src/flask/` is kept over `tests/apps/inner/flask.py`.
+      const top = matches.length > 1 ? matches.filter((path) => !this.byPath.has(`${path.slice(0, path.lastIndexOf(`/${rest}`))}/__init__.py`)) : matches;
+      this.pythonSuffixCache.set(rest, top.length === 1 ? (top[0] ?? null) : null);
     }
     const file = this.pythonSuffixCache.get(rest) ?? null;
+    // A module next to the importing file may be the one meant instead (a script's folder is searched first): not told.
+    const beside = file ? this.pythonModule(posix.join(posix.dirname(from), rest)) : null;
+    if (beside && beside !== file) return { file: null, local: false };
     return { file, local: file !== null };
   }
 
@@ -1213,6 +1221,16 @@ class Linker {
   }
 
   private findExport(path: string, name: string, hops = 0): string | null {
+    if (hops > 0) return this.exportOf(path, name, hops);
+    const key = `${path}\u0000${name}`;
+    const cached = this.exportCache.get(key);
+    if (cached !== undefined) return cached;
+    const found = this.exportOf(path, name, 0);
+    this.exportCache.set(key, found);
+    return found;
+  }
+
+  private exportOf(path: string, name: string, hops: number): string | null {
     const own = this.symbols.get(path);
     const symbol = name === "default" ? [...(own?.values() ?? [])].find((candidate) => candidate.isDefault) : own?.get(name);
     if (symbol) return symbolId(path, symbol.name);
@@ -1223,12 +1241,16 @@ class Linker {
     const aliased = facts && alias ? this.resolveName(facts, alias.local, hops + 1) : null;
     if (aliased) return aliased;
     const resolved = this.resolvedImports.get(path);
-    for (const fact of facts?.imports ?? []) {
-      if (!fact.reexport) continue;
+    // A Python module has what it imports: `from ._client import Client` in `__init__.py` makes it `package.Client`.
+    // The last import of a name is the one that stays, and a star passes on no name that starts with an underscore.
+    const python = facts?.language === "python";
+    for (const fact of python ? [...(facts?.imports ?? [])].reverse() : (facts?.imports ?? [])) {
+      if ((!fact.reexport && !python) || fact.inner) continue;
       const target = resolved?.get(fact);
-      if (!target) continue;
-      const passed = fact.star ? name : fact.names.find((candidate) => candidate.local === name)?.imported;
-      const found = passed ? this.findExport(target, passed, hops + 1) : null;
+      if (!target || target === path) continue;
+      const passed = fact.star ? (python && name.startsWith("_") ? undefined : name) : fact.names.find((candidate) => candidate.local === name)?.imported;
+      // `import a.b as name` gives a module, which is not a symbol.
+      const found = passed && passed !== "*" ? this.findExport(target, passed, hops + 1) : null;
       if (found) return found;
     }
     return null;
@@ -1238,6 +1260,12 @@ class Linker {
   private resolveName(facts: FileFacts, name: string, hops = 0): string | null {
     if (this.symbols.get(facts.path)?.has(name)) return symbolId(facts.path, name);
     const binding = this.bindings(facts).get(name);
+    // Python: `httpx.Client` as a type or a parent class, where `httpx` is a module.
+    const dot = facts.language === "python" && !binding ? name.lastIndexOf(".") : -1;
+    if (dot > 0) {
+      const module = this.pythonModuleNamed(facts, name.slice(0, dot));
+      return module ? this.findExport(module, name.slice(dot + 1), hops) : null;
+    }
     if (!binding || binding.imported === "*") return null;
     return this.findExport(binding.file, binding.imported === "=" ? "default" : binding.imported, hops);
   }
@@ -1263,15 +1291,142 @@ class Linker {
   private memberOf(classId: string, name: string, depth = 0): string | null {
     const member = `${classId}.${name}`;
     if (this.nodes.has(member)) return member;
+    if (depth >= MAX_INHERITANCE_DEPTH) return null;
+    for (const parent of this.scriptParents(classId)) {
+      const found = this.memberOf(parent, name, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** The classes a TypeScript, JavaScript or Python class extends, in the order written, as far as they are of this repository. */
+  private scriptParents(classId: string): string[] {
     const declared = this.classes.get(classId);
-    if (!declared?.symbol.extends || depth >= MAX_INHERITANCE_DEPTH) return null;
-    const parent = this.resolveName(declared.facts, declared.symbol.extends);
-    return parent && parent !== classId ? this.memberOf(parent, name, depth + 1) : null;
+    if (!declared?.symbol.extends) return [];
+    const written = [declared.symbol.extends, ...(declared.facts.language === "python" ? (declared.symbol.embeds ?? []) : [])];
+    return written.map((name) => this.resolveName(declared.facts, name)).filter((parent): parent is string => parent !== null && parent !== classId);
   }
 
   private instanceMember(facts: FileFacts, local: LocalFact, name: string, depth = 0): string | null {
-    const owner = local.type ? this.resolveName(facts, local.type) : local.from ? this.scriptReturned(facts, local.from, depth) : null;
+    const owner = this.instanceOwner(facts, local, depth);
     return owner ? this.memberOf(owner, name) : null;
+  }
+
+  /** The class a local holds an instance of: the type written for it, or what the call it was made by gives. */
+  private instanceOwner(facts: FileFacts, local: LocalFact, depth = 0): string | null {
+    if (local.kind !== "instance") return null;
+    const owner = local.type ? this.resolveName(facts, local.type) : local.from ? this.scriptReturned(facts, local.from, depth) : null;
+    if (!owner || facts.language !== "python" || !local.via) return owner;
+    // `with Client() as client`: what `__enter__` gives, as far as it says: a type written, or every `return` of it.
+    // Where it says nothing that can be read, or the class has none in this repository, the name is not followed.
+    const enter = this.memberOf(owner, local.via);
+    const path = enter ? enter.slice(4, enter.indexOf("#")) : "";
+    const name = enter ? enter.slice(enter.indexOf("#") + 1) : "";
+    const declaring = this.byPath.get(path);
+    const returns = this.symbols.get(path)?.get(name)?.returns;
+    if (!declaring || returns === undefined) return null;
+    if (returns.startsWith("?") !== (local.via === "__aenter__")) return null;
+    const made = this.resolveName(declaring, returns.replace(/^\?/, ""));
+    // Its own class, written by name or as `Self`, in a parent: still the object that was made.
+    if (made === symbolId(path, name.slice(0, name.lastIndexOf(".")))) return owner;
+    return made && this.classes.has(made) ? made : null;
+  }
+
+  /**
+   * Python: the class held by a field or a property of a class, looked up through its parents:
+   * what every `self.name = ...` of the class agrees on, or what a method of that name says it returns.
+   */
+  private pythonField(classId: string, name: string, depth = 0): string | null {
+    if (depth >= MAX_INHERITANCE_DEPTH) return null;
+    const declared = this.classes.get(classId);
+    if (!declared) return null;
+    const field = declared.facts.locals.find((local) => local.name === `self.${name}` && local.line === declared.symbol.line && local.endLine === declared.symbol.endLine);
+    if (field) return this.instanceOwner(declared.facts, field, depth + 1);
+    const property = `${classId}.${name}`;
+    if (this.nodes.has(property)) {
+      const returns = this.symbols.get(declared.facts.path)?.get(`${declared.symbol.name}.${name}`)?.returns;
+      const made = returns && !returns.startsWith("?") ? this.resolveName(declared.facts, returns) : null;
+      return made && this.classes.has(made) ? made : null;
+    }
+    for (const parent of this.scriptParents(classId)) {
+      // A parent that has the field and cannot tell what it holds settles it too.
+      if (this.pythonHas(parent, name)) return this.pythonField(parent, name, depth + 1);
+    }
+    return null;
+  }
+
+  /** Python: whether a class, or one it extends, assigns the field or defines a method of that name. */
+  private pythonHas(classId: string, name: string, depth = 0): boolean {
+    const declared = this.classes.get(classId);
+    if (!declared || depth >= MAX_INHERITANCE_DEPTH) return false;
+    if (this.nodes.has(`${classId}.${name}`) || declared.facts.locals.some((local) => local.name === `self.${name}` && local.line === declared.symbol.line && local.endLine === declared.symbol.endLine)) return true;
+    return this.scriptParents(classId).some((parent) => this.pythonHas(parent, name, depth + 1));
+  }
+
+  /** Python: the file of the module a dotted name stands for here: `httpx` after `import httpx`, `a.b` after `import a.b`, `pkg.sub` where `sub` is a module of the package `pkg`. */
+  private pythonModuleNamed(facts: FileFacts, name: string): string | null {
+    const binding = this.bindings(facts).get(name);
+    if (binding) return binding.imported === "*" ? binding.file : null;
+    const dot = name.lastIndexOf(".");
+    const parent = dot > 0 ? this.pythonModuleNamed(facts, name.slice(0, dot)) : null;
+    return parent?.endsWith("/__init__.py") ? this.pythonModule(`${posix.dirname(parent)}/${name.slice(dot + 1)}`) : null;
+  }
+
+  /**
+   * Python: a variable of a module that holds an instance (`current_app: Flask = ...`, `base62 = Converter()`),
+   * found in the module that assigns it, through the modules that import it on the way. Assigned twice, it is not told.
+   */
+  private pythonValue(path: string, name: string): { facts: FileFacts; local: LocalFact } | null {
+    const key = `${path}\u0000${name}`;
+    const cached = this.valueCache.get(key);
+    if (cached !== undefined) return cached;
+    const found = this.pythonValueIn(path, name, 0, new Map());
+    this.valueCache.set(key, found);
+    return found;
+  }
+
+  private pythonValueIn(path: string, name: string, hops: number, seen: Map<string, number>): { facts: FileFacts; local: LocalFact } | null {
+    const facts = this.byPath.get(path);
+    if (facts?.language !== "python" || this.symbols.get(path)?.has(name)) return null;
+    if (facts.rebound?.includes(name)) return null;
+    const own = facts.locals.filter((local) => local.name === name && !this.enclosing(facts, local.line));
+    if (own.length > 0) return own.length === 1 && own[0]?.kind === "instance" ? { facts, local: own[0] } : null;
+    // A module already looked in with as many hops left has nothing new to say.
+    const key = `${path}\u0000${name}`;
+    if (hops >= MAX_REEXPORT_HOPS || (seen.get(key) ?? Infinity) <= hops) return null;
+    seen.set(key, hops);
+    const resolved = this.resolvedImports.get(path);
+    for (const fact of [...facts.imports].reverse()) {
+      const target = resolved?.get(fact);
+      if (!target || target === path || fact.inner) continue;
+      const passed = fact.star ? (name.startsWith("_") ? undefined : name) : fact.names.find((candidate) => candidate.local === name)?.imported;
+      if (passed === undefined) continue;
+      const found = passed === "*" ? null : this.pythonValueIn(target, passed, hops + 1, seen);
+      // An import of the name itself is what the name is, whatever came before. A star may not have had it.
+      if (found || !fact.star) return found;
+    }
+    return null;
+  }
+
+  /** Python: the class an expression of names holds an instance of: `client`, `self.store`, `app.config`, `self.app.config`, `module.value`. */
+  private pythonHolder(facts: FileFacts, expression: string, classId: string | null, line: number, column: number | undefined, depth: number): string | null {
+    const local = this.local(facts, expression, line, column);
+    if (local) return this.instanceOwner(facts, local, depth);
+    const dot = expression.lastIndexOf(".");
+    if (dot <= 0) {
+      // A variable of another module, imported by name.
+      const binding = this.bindings(facts).get(expression);
+      const value = binding && binding.imported !== "*" && binding.imported !== "=" ? this.pythonValue(binding.file, binding.imported) : null;
+      return value ? this.instanceOwner(value.facts, value.local, depth + 1) : null;
+    }
+    const before = expression.slice(0, dot);
+    if (before !== "self" && !this.local(facts, before.split(".")[0] ?? "", line, column)) {
+      const module = this.pythonModuleNamed(facts, before);
+      const value = module ? this.pythonValue(module, expression.slice(dot + 1)) : null;
+      if (value) return this.instanceOwner(value.facts, value.local, depth + 1);
+    }
+    const owner = before === "self" ? classId : this.pythonHolder(facts, before, classId, line, column, depth);
+    return owner ? this.pythonField(owner, expression.slice(dot + 1)) : null;
   }
 
   /**
@@ -1302,11 +1457,20 @@ class Linker {
       // A local of that name hides any function of the file: when it cannot be followed, nothing is linked.
       const local = this.local(facts, call.callee, call.line, call.column);
       // In Python a name of the module given the result of a call (`helper = cached(helper)`) is still called by that name.
-      if (!local || (facts.language === "python" && local.kind === "instance")) return this.resolveName(facts, call.callee);
+      if (!local || (facts.language === "python" && local.kind === "instance" && !local.via)) return this.resolveName(facts, call.callee);
       return local.kind === "member" && local.object && local.property ? this.resolveMember(facts, local.object, local.property, local.line, local.column) : null;
     }
     // `a.open().read()`, `new T().run()`: a method of the class the inner call gives.
     if (call.receiver === "()") {
+      // `super().run()` in Python.
+      if (facts.language === "python" && call.via?.receiver === null && call.via.callee === "super" && !this.local(facts, "super", call.line, call.column)) {
+        // Each parent in turn, which is what Python does where the parents share none of their own.
+        for (const parent of classId ? this.scriptParents(classId) : []) {
+          const found = this.memberOf(parent, call.callee);
+          if (found) return found;
+        }
+        return null;
+      }
       const owner = call.via ? this.scriptReturned(facts, call.via, depth) : null;
       return owner ? this.memberOf(owner, call.callee) : null;
     }
@@ -1315,6 +1479,18 @@ class Linker {
       const declared = classId ? this.classes.get(classId) : undefined;
       const parent = declared?.symbol.extends ? this.resolveName(declared.facts, declared.symbol.extends) : null;
       return parent ? this.memberOf(parent, call.callee) : null;
+    }
+    if (facts.language === "python" && call.receiver.includes(".")) {
+      // A path of modules (`package.module.run()`), a class named through one (`httpx.Client.build()`), or a value's field.
+      const root = call.receiver.slice(0, call.receiver.indexOf("."));
+      if (root !== "self" && !this.local(facts, root, call.line, call.column)) {
+        const module = this.pythonModuleNamed(facts, call.receiver);
+        if (module) return this.findExport(module, call.callee);
+        const named = this.resolveName(facts, call.receiver);
+        if (named) return this.memberOf(named, call.callee);
+      }
+      const owner = this.pythonHolder(facts, call.receiver, classId, call.line, call.column, depth);
+      return owner ? this.memberOf(owner, call.callee) : null;
     }
     if (call.receiver.startsWith("this.") || call.receiver.startsWith("self.")) {
       const field = this.local(facts, call.receiver, call.line, call.column);
@@ -1337,6 +1513,10 @@ class Linker {
     if (named) return named;
     const exported = binding.imported === "=" ? "default" : binding.imported;
     const owner = this.findExport(binding.file, exported);
+    if (!owner && facts.language === "python") {
+      const holder = this.pythonHolder(facts, object, null, line, column, depth);
+      return holder ? this.memberOf(holder, property) : null;
+    }
     return (owner ? this.memberOf(owner, property) : null) ?? (exported === "default" ? this.findExport(binding.file, `default.${property}`) : null);
   }
 
@@ -1394,6 +1574,8 @@ class Linker {
     // A Rust path (`fs::write`, `std::io::stdout`) names a function, not a value.
     if (receiver.includes("::") && facts.language === "rust") return false;
     const root = receiver.replace(/^@/, "").split(/\.|::/)[0] ?? "";
+    // Python: a call through a longer path of names (`request.headers.get()`) is on a field of something, which is not listed.
+    if (facts.language === "python" && receiver.includes(".") && !/^self\.\w+$/.test(receiver)) return false;
     if (root === "this" || root === "self" || root === "super" || (root === "cls" && facts.language === "python")) {
       if (receiver === root) return false;
     } else {

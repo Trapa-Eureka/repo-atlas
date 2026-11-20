@@ -10,7 +10,7 @@ export interface SymbolFact {
   isDefault: boolean;
   /** For a class: the name it extends, as written in this file. */
   extends?: string;
-  /** For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. For a Rust type: the traits implemented for it in its own file. For a Ruby class or module: what it includes, extends or prepends. */
+  /** For a Python class: the parents after the first, in the order written. For a Go struct: the types it embeds, whose methods it gets. For a Java type: the interfaces it implements or extends. For a Rust type: the traits implemented for it in its own file. For a Ruby class or module: what it includes, extends or prepends. */
   embeds?: string[];
   /**
    * For a Rust function or method: the type it returns, `?T` when wrapped in `Result` or `Option`. Says whether `let x = T::new()` makes `x` a `T`.
@@ -58,7 +58,10 @@ export interface LocalFact {
   type?: string;
   /** Go, Rust and Java: the call whose result the name holds (`x := NewClient()`, `let x = open()?`, `var x = open()`), when no type is written. The type is what that function returns, which another file may say. */
   from?: CallRef;
-  /** Rust: the constructor the type was read from (`new` in `let x = T::new()`, `?new` in `let x = T::new()?`), to be checked against what it returns. */
+  /**
+   * Rust: the constructor the type was read from (`new` in `let x = T::new()`, `?new` in `let x = T::new()?`), to be checked against what it returns.
+   * Python: `__enter__` or `__aenter__` for the name of `with made() as name`, which holds what that method of the object made returns.
+   */
   via?: string;
   line: number;
   endLine: number;
@@ -82,6 +85,8 @@ export interface ImportFact {
   line: number;
   /** Java: `import static`, which names members of a class instead of a class or a package. */
   static?: boolean;
+  /** Python: written inside a function, where it binds a name of that function and gives the module nothing. */
+  inner?: boolean;
   /** Go: the names of the package this file uses (`pkg.Name`), to tell which of the package's files it depends on. */
   members?: string[];
 }
@@ -148,6 +153,8 @@ export interface FileFacts {
   uses?: { name: string; line: number; /** Ruby: the parent in `class A < B`, which is looked up from outside the class that starts on that line. */ outside?: boolean; /** Java: the name stands where a variable could stand too; it is a class only if no variable of that name is in view. */ maybe?: boolean }[];
   /** Ruby: the lines of each class and module body, with the full names of the namespaces around it, innermost first. A constant is looked up in each in turn. */
   namespaces?: { names: string[]; line: number; endLine: number }[];
+  /** Python: the names of the module given something that tells no class (`current = other`, `current = None`). With one of these, what else the name was given says nothing. */
+  rebound?: string[];
   symbols: SymbolFact[];
   imports: ImportFact[];
   calls: CallFact[];
