@@ -40,7 +40,7 @@ export function createMcpServer(root: string): { server: McpServer; close: () =>
 
   async function answer(work: (atlas: Atlas) => unknown) {
     try {
-      return reply(work(await atlas()));
+      return reply(await work(await atlas()));
     } catch (error) {
       return failure(error);
     }
@@ -72,6 +72,16 @@ export function createMcpServer(root: string): { server: McpServer; close: () =>
       inputSchema: { target: z.string().describe(TARGET), depth: z.number().int().min(1).optional() },
     },
     ({ target, depth }) => answer((a) => a.impact(target, depth)),
+  );
+
+  server.registerTool(
+    "atlas_diff",
+    {
+      description:
+        "What the uncommitted changes touch (or everything since `base`, such as `main`): the functions, classes, tables and env keys the changed lines are in, everything that depends on them, which test files to run, which changed code no test depends on, and which docs to check. Use it after editing and before committing.",
+      inputSchema: { base: z.string().describe("A branch, tag or commit to compare with. Default: the last commit.").optional(), depth: z.number().int().min(1).optional() },
+    },
+    ({ base, depth }) => answer((a) => a.diff(base, depth)),
   );
 
   server.registerTool(

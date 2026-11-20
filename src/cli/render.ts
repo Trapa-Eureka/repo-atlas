@@ -1,6 +1,7 @@
 import type { GraphNode } from "../graph/types.js";
 import type { IndexSummary } from "../indexer/indexer.js";
 import type { UnresolvedImport } from "../indexer/link.js";
+import type { ChangesResult } from "../query/changes.js";
 import type { ContextResult } from "../query/context.js";
 import type { ImpactResult } from "../query/impact.js";
 import type { PathResult } from "../query/path.js";
@@ -44,9 +45,9 @@ export function renderContext(result: ContextResult): string {
   return lines.join("\n");
 }
 
-export function renderImpact(result: ImpactResult): string {
-  const lines = [`Impact of changing ${result.target.id}`];
-  if (result.affected.length === 0) return `${lines[0]}\n  Nothing in the index depends on it.`;
+/** The affected nodes grouped by how many steps they are from what changed, each group after an empty line. */
+function affectedLines(result: Pick<ImpactResult, "affected" | "truncatedAtDepth">): string[] {
+  const lines: string[] = [];
   const byDistance = new Map<number, typeof result.affected>();
   for (const entry of result.affected) byDistance.set(entry.distance, [...(byDistance.get(entry.distance) ?? []), entry]);
   for (const [distance, entries] of [...byDistance].sort((a, b) => a[0] - b[0])) {
@@ -56,6 +57,48 @@ export function renderImpact(result: ImpactResult): string {
     }
   }
   if (result.truncatedAtDepth !== null) lines.push("", `Stopped at depth ${result.truncatedAtDepth}; more nodes are affected further out.`);
+  return lines;
+}
+
+export function renderImpact(result: ImpactResult): string {
+  const title = `Impact of changing ${result.target.id}`;
+  if (result.affected.length === 0) return `${title}\n  Nothing in the index depends on it.`;
+  return [title, ...affectedLines(result)].join("\n");
+}
+
+export function renderChanges(result: ChangesResult): string {
+  const since = result.base === "HEAD" ? "the last commit" : `${result.base} (${result.commit.slice(0, 7)})`;
+  const count = result.changed.length + result.outside.length;
+  if (count === 0) return `Nothing changed since ${since}.`;
+  const lines = [`Changes since ${since}: ${count} ${count === 1 ? "file" : "files"}`];
+
+  if (result.changed.length > 0) lines.push("", `changed (${result.changed.length})`);
+  for (const entry of result.changed) {
+    lines.push(`  ${entry.file}  (${entry.status}${entry.from ? ` from ${entry.from}` : ""}${entry.quiet ? ", comments and blank lines only" : ""})`);
+    for (const node of entry.nodes) lines.push(`    ${node.id}${node.kind === "symbol" && node.line ? `  line ${node.line}` : ""}`);
+    if (entry.fileLevel && entry.nodes.length > 0 && entry.status === "modified") lines.push("    and lines outside any of these: the file as a whole counts as changed");
+  }
+  if (result.outside.length > 0) {
+    lines.push("", `not in the index (${result.outside.length})`);
+    for (const item of result.outside) lines.push(`  ${item.file}  (${item.status})`);
+  }
+
+  if (result.broken.length > 0) {
+    lines.push("", `imports that lead nowhere now (${result.broken.length})`);
+    for (const item of result.broken) lines.push(`  ${item.file}:${item.line}  ${item.specifier}  (was ${item.gone})`);
+  }
+
+  if (result.affected.length === 0) lines.push("", "Nothing else in the index depends on what changed.");
+  else lines.push("", `affected (${result.affected.length})`, ...affectedLines(result).slice(1).map((line) => (line ? `  ${line}` : line)));
+
+  const list = (title: string, nodes: GraphNode[]): void => {
+    if (nodes.length === 0) return;
+    lines.push("", `${title} (${nodes.length})`);
+    for (const node of nodes) lines.push(`  ${node.id}`);
+  };
+  list("tests to run", result.tests);
+  list("changed code no test depends on", result.untested);
+  list("docs to check", result.docs);
   return lines.join("\n");
 }
 

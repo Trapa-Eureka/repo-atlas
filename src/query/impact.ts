@@ -34,16 +34,15 @@ export function seedsOf(graph: Graph, target: GraphNode): string[] {
 }
 
 /**
- * Everything that may need attention when the target changes: reverse reachability over dependency
- * edges. Symbol-level paths stay precise (callers of callers). A file reached through an import is
- * followed to its own importers, because which of its symbols are affected is unknown. A doc that
- * mentions an affected node is reported but not followed: docs citing that doc are not affected.
+ * Reverse reachability over dependency edges from a set of changed nodes. Symbol-level paths stay
+ * precise (callers of callers). A file reached through an import is followed to its own importers,
+ * because which of its symbols are affected is unknown. A doc that mentions an affected node is
+ * reported but not followed: docs citing that doc are not affected.
  */
-export function impact(graph: Graph, target: GraphNode, maxDepth = Infinity): ImpactResult {
-  const seeds = seedsOf(graph, target);
+export function spread(graph: Graph, seeds: readonly string[], maxDepth = Infinity): { affected: ImpactEntry[]; truncated: boolean } {
   const visited = new Set(seeds);
   const affected: ImpactEntry[] = [];
-  let frontier = seeds;
+  let frontier = [...seeds];
   let distance = 0;
   let truncated = false;
 
@@ -74,6 +73,12 @@ export function impact(graph: Graph, target: GraphNode, maxDepth = Infinity): Im
     }
     frontier = next;
   }
+  return { affected, truncated };
+}
 
+/** Everything that may need attention when the target changes: the target, what it owns, and whatever depends on those. */
+export function impact(graph: Graph, target: GraphNode, maxDepth = Infinity): ImpactResult {
+  const seeds = seedsOf(graph, target);
+  const { affected, truncated } = spread(graph, seeds, maxDepth);
   return { target, seeds, affected, truncatedAtDepth: truncated ? maxDepth : null };
 }

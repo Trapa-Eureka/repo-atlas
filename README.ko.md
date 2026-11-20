@@ -73,7 +73,7 @@ flowchart LR
 
 **같은 그래프를 코딩 에이전트에게** (Phase 4). Model Context Protocol로 제공합니다.
 
-<img src="assets/mcp.png" alt="터미널: atlas init이 MCP 서버를 등록하고, 서버가 도구 6개를 나열하며, atlas_path 호출이 web/App.tsx에서 users 테이블까지의 연결을 돌려준다" width="820">
+<img src="assets/mcp.png" alt="터미널: atlas init이 MCP 서버를 등록하고, 서버가 도구 7개를 나열하며, atlas_path 호출이 web/App.tsx에서 users 테이블까지의 연결을 돌려준다" width="820">
 
 **규칙은 지시문이 아니라 도구가 지킵니다** (Phase 0). 잘못된 레이어에서 SQLite에 손을 대는 편집은 대신 무엇을 해야 하는지와 함께 곧바로 에이전트에게 되돌아갑니다.
 
@@ -93,7 +93,8 @@ flowchart LR
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, 모두 `--json` 지원 | 완료 |
 | `atlas mermaid`: 파일 단위 전체 그림 또는 노드 하나의 주변 | 완료 |
 | `atlas view`: 그래프를 브라우저에서 탐색하는 HTML 페이지 하나로 저장 (서버 없음) | 완료 |
-| `atlas mcp`: 도구 6개를 가진 MCP 서버(stdio). `atlas init`이 Claude Code, VS Code, Cursor, Devin(Windsurf), JetBrains에 등록 | 완료 |
+| `atlas diff`: 커밋이나 브랜치 이후의 변경이 건드린 것, 거기에 의존하는 것, 실행할 테스트, 어떤 테스트도 의존하지 않는 변경 코드 | 완료 |
+| `atlas mcp`: 도구 7개를 가진 MCP 서버(stdio). `atlas init`이 Claude Code, VS Code, Cursor, Devin(Windsurf), JetBrains에 등록 | 완료 |
 | 로컬 SQLite 인덱스(내장 `node:sqlite`, 컴파일할 것 없음) | 완료 |
 | npm 패키지 배포 (`repo-atlas-cli`) | 완료 |
 | 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 | 계획중 |
@@ -169,6 +170,7 @@ alias atlas='node /path/to/repo-atlas/dist/cli/main.js'   # 경로는 맞게 바
 | 모든 테이블(또는 환경변수 키) 나열 | `atlas search "" --kind table` |
 | 고치기 전 브리핑 받기 | `atlas context <target>` |
 | 변경이 깨뜨릴 수 있는 것 보기 | `atlas impact <target> [--depth n]` |
+| 내 수정(또는 내 브랜치)이 미치는 영향 보기 | `atlas diff [base] [--depth n]` |
 | 두 대상이 어떻게 이어지는지 보기 | `atlas path <from> <to>` |
 | 파일 단위 전체 그림 그리기 | `atlas mermaid [--max n] [-o graph.mmd]` |
 | 노드 하나의 주변 그리기 | `atlas mermaid --focus <target> [--depth n]` |
@@ -191,6 +193,40 @@ alias atlas='node /path/to/repo-atlas/dist/cli/main.js'   # 경로는 맞게 바
 ### `impact` 읽는 법
 
 각 줄 끝에는 그 노드가 나온 이유가 붙습니다: `[calls X]`, `[imports X]`, `[reads_table X]`, `[documents X]`. `[contains X]`는 영향받는 함수가 들어 있는 파일이라는 표시입니다. 영향받는 노드를 언급하는 문서는 고칠 수 있도록 나열하지만, 그 문서에서 더 따라가지는 않습니다.
+
+### 내 변경이 미치는 영향
+
+`atlas diff`는 바뀐 줄을 git에서 읽어 그래프에서 찾습니다. 인자가 없으면 아직 커밋하지 않은 것(스테이징 여부와 무관한 수정, 새 파일)을 다루고, 브랜치·태그·커밋을 주면 현재 브랜치가 거기서 갈라진 뒤의 모든 변경을 다룹니다. 그래서 `atlas diff main`은 그 사이 `main`에 무엇이 들어왔든 풀 리퀘스트 전체입니다.
+
+```text
+$ atlas diff
+Changes since the last commit: 3 files
+
+changed (3)
+  src/db/schema.sql  (modified)
+    table:users
+  src/users/repo.ts  (modified)
+    sym:src/users/repo.ts#findUser  line 3
+  test/repo.test.ts  (untracked)
+
+affected (13)
+  direct (10)
+    file:docs/architecture.md  [documents table:users]
+    file:scripts/report.py  [reads_table table:users]
+    sym:src/api/handler.ts#handleOrder  [calls sym:src/users/repo.ts#findUser]
+    ...
+
+tests to run (1)
+  file:test/repo.test.ts
+
+docs to check (1)
+  file:docs/architecture.md
+```
+
+- 바뀐 줄은 그 줄을 감싸는 가장 안쪽 함수·메서드·클래스의 변경으로 칩니다. 그래서 같은 파일의 다른 함수를 호출하는 쪽은 나오지 않습니다. 어느 것에도 속하지 않는 줄(import, 최상위 코드, 두 함수 사이에서 지워진 것)은 파일의 변경으로 치고, 그때는 그 파일을 import하는 파일들이 나옵니다. `.sql` 파일에서는 테이블 정의가 다음 정의 전까지 이어진다고 봅니다.
+- 추가하거나 고친 줄 가운데 빈 줄과 주석만 있는 줄은 빼므로, 주석을 쓰는 것은 아무것에도 영향을 주지 않습니다. 그 언어의 한 줄 주석(`//`, `#`, `--`)으로 시작하거나, 줄 첫머리에서 시작한 블록 주석 안에 있는 줄을 주석으로 봅니다. 그보다 불분명하면 코드로 치고, Python 독스트링도 코드로 칩니다. 지워지기만 한 줄은 이렇게 읽을 수 없어서, 주석을 지운 것은 변경으로 칩니다. 줄 번호가 작업 트리에서 오기 때문에 `--no-refresh`를 주더라도 인덱스를 항상 먼저 갱신합니다.
+- 지우거나 이름을 바꾼 파일은 더 이상 그래프에 없습니다. 이제 갈 곳이 없으면서 그 파일을 가리키는 import를 나열합니다. 상대 경로(`../db/client.js`)는 사라진 그 파일로 이어져야 하고, 그 밖의 형태(`jobs.utils`, `crate::outbox`)는 이름만으로 맞추므로 원래부터 깨져 있던 import일 수도 있습니다. 패키지는 여전히 찾아지는 Python의 `from package import gone`은 잡지 못합니다.
+- 테스트 파일은 `test/`, `tests/`, `__tests__/`, `spec/`, `e2e/` 같은 폴더에 있거나 `a.test.ts`, `a_test.go`, `test_a.py`, `ATest.java`, `a_spec.rb`처럼 이름 붙은 파일입니다. "changed code no test depends on"은 어떤 테스트 파일도 import와 호출을 따라, 간접적으로도, 닿지 못하는 변경 함수를 나열합니다. 테스트 파일이 어떤 파일을 import하면 그 파일의 모든 함수가 닿는 것으로 칩니다. 다른 기능과 같은 호출 엣지에 기대므로, 인터페이스 같은 동적 디스패치로만 닿는 함수는 테스트가 실제로 실행하더라도 나열될 수 있습니다. 소스 파일 안에 쓴 테스트(Rust의 `#[cfg(test)]` 모듈)는 코드와 구분하지 못합니다.
 
 ### 이 저장소 개발하기
 
@@ -218,7 +254,7 @@ atlas init --client cursor    # 또는 vscode, devin(windsurf로 적어도 됨),
 | Devin Local (Windsurf) | `devin`, `windsurf` | `.devin/mcp_config.json`에 씁니다 | **Customize > MCPs**를 열고 새로 고칩니다 |
 | JetBrains AI Assistant | `jetbrains` | 항목을 출력합니다. JetBrains는 저장소 안에 이 설정 파일을 두지 않습니다 | **Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add**에 붙여 넣습니다 |
 
-각 파일은 그 제품의 문서가 저장소용으로 안내하는 파일이며, `atlas`가 작업하는 폴더(저장소 루트 또는 `-C`)에 씁니다. `atlas init`은 그 밖의 위치에서 설정을 찾지 않습니다. 올바른 JSON이 아닌 파일은 그대로 두고 알려 줍니다. Windsurf 문서는 이제 Devin Local로 이어지므로 `windsurf`는 Devin 파일에 씁니다. 처음부터 끝까지 실행해 본 것은 Claude Code, 그리고 명령줄 에이전트를 통한 Cursor입니다(3.26, 서버를 승인한 뒤 `cursor-agent mcp list-tools repo-atlas`가 도구 6개를 보여 줍니다). VS Code는 설치본(1.109)과 대조해 확인했습니다. 그 버전은 `.vscode/mcp.json`만 읽고 저장소 루트의 파일은 읽지 않으므로 `vscode`는 거기에 씁니다. VS Code 문서에 따르면 더 새로운 버전은 설정 `chat.mcp.workspaceRootConfig.enabled`를 켜면 `atlas init`이 쓰는 `.mcp.json`도 읽을 수 있습니다. 이 부분은 여기서 확인하지 않았습니다. 주석이 들어 있는 `.vscode/mcp.json`은 `atlas init`에게는 올바른 JSON이 아니어서, 그대로 두고 그렇다고 알려 줍니다. VS Code 안에서 서버를 실제로 띄워 보지는 않았고, Devin과 JetBrains는 2026년 11월 기준 문서를 따랐을 뿐 실행해 보지 않았습니다.
+각 파일은 그 제품의 문서가 저장소용으로 안내하는 파일이며, `atlas`가 작업하는 폴더(저장소 루트 또는 `-C`)에 씁니다. `atlas init`은 그 밖의 위치에서 설정을 찾지 않습니다. 올바른 JSON이 아닌 파일은 그대로 두고 알려 줍니다. Windsurf 문서는 이제 Devin Local로 이어지므로 `windsurf`는 Devin 파일에 씁니다. 처음부터 끝까지 실행해 본 것은 Claude Code, 그리고 명령줄 에이전트를 통한 Cursor입니다(3.26, 서버를 승인한 뒤 `cursor-agent mcp list-tools repo-atlas`가 도구 목록을 보여 줍니다). VS Code는 설치본(1.109)과 대조해 확인했습니다. 그 버전은 `.vscode/mcp.json`만 읽고 저장소 루트의 파일은 읽지 않으므로 `vscode`는 거기에 씁니다. VS Code 문서에 따르면 더 새로운 버전은 설정 `chat.mcp.workspaceRootConfig.enabled`를 켜면 `atlas init`이 쓰는 `.mcp.json`도 읽을 수 있습니다. 이 부분은 여기서 확인하지 않았습니다. 주석이 들어 있는 `.vscode/mcp.json`은 `atlas init`에게는 올바른 JSON이 아니어서, 그대로 두고 그렇다고 알려 줍니다. VS Code 안에서 서버를 실제로 띄워 보지는 않았고, Devin과 JetBrains는 2026년 11월 기준 문서를 따랐을 뿐 실행해 보지 않았습니다.
 
 직접 추가하려면 아래 항목을 적습니다(`"type": "stdio"`는 VS Code와 Cursor가 요구하는 값이고, 나머지는 없어도 됩니다. `.vscode/mcp.json`에서는 바깥 이름이 `mcpServers`가 아니라 `servers`입니다).
 
@@ -237,6 +273,7 @@ atlas init --client cursor    # 또는 vscode, devin(windsurf로 적어도 됨),
 | `atlas_search` | 이 이름을 가진 노드는? |
 | `atlas_context` | 이걸 고치기 전에 무엇을 알아야 하나? |
 | `atlas_impact` | 무엇이 여기에 의존하고, 어떤 문서가 언급하나? |
+| `atlas_diff` | 커밋하지 않은 변경(또는 브랜치)이 무엇에 영향을 주고, 어떤 테스트가 그것을 다루나? |
 | `atlas_path` | 이 둘은 어떻게 이어져 있나? |
 | `atlas_mermaid` | 그래프의 이 부분을 그려 줘 |
 | `atlas_stats` | 그래프 크기, 허브 파일, 해석 못 한 import는? |
@@ -300,7 +337,7 @@ repo-atlas/
 │   ├── extract/   # 파일 하나 -> 사실 (tree-sitter, SQL, env, Markdown)
 │   ├── indexer/   # 파일 목록, import 별칭, 사실을 그래프로 연결, 증분 인덱싱
 │   ├── store/     # SQLite (SQL을 아는 유일한 모듈)
-│   ├── query/     # search, context, impact, path, mermaid, stats (메모리 내 그래프 위의 순수 함수)
+│   ├── query/     # search, context, impact, changes, path, mermaid, stats (메모리 내 그래프 위의 순수 함수)
 │   ├── app/       # Atlas: CLI와 MCP 서버가 함께 부르는 것
 │   ├── mcp/       # MCP 서버
 │   └── cli/       # `atlas` 명령
@@ -337,6 +374,7 @@ TypeScript(ESM), Node.js 22+ · 미리 빌드된 WASM 문법을 쓰는 [web-tree
     - [x] Ruby
   - [x] 로컬 HTML 뷰어 (`atlas view`)
   - [x] 에디터 안의 에이전트용 설정 (`atlas init --client`): VS Code, Cursor, Devin(Windsurf), JetBrains
+  - [x] git에서 읽은 변경분의 영향 (`atlas diff`)
 - [ ] **Phase 6**: 유료 플랜: private 저장소 호스티드 인덱싱, 팀 공유 그래프, CI 연동 (계획중)
 
 ## 기여

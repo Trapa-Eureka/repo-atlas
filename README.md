@@ -71,7 +71,7 @@ flowchart LR
 
 **The same graph for a coding agent** (Phase 4), over the Model Context Protocol:
 
-<img src="assets/mcp.png" alt="Terminal: atlas init registers the MCP server, the server lists six tools, and a call to atlas_path returns the chain from web/App.tsx to the users table" width="820">
+<img src="assets/mcp.png" alt="Terminal: atlas init registers the MCP server, the server lists seven tools, and a call to atlas_path returns the chain from web/App.tsx to the users table" width="820">
 
 **Rules enforced by tools, not by instructions** (Phase 0). An edit that reaches into SQLite from the wrong layer is sent straight back to the agent, with what to do instead:
 
@@ -89,9 +89,10 @@ flowchart LR
 | Call resolution through named, default and namespace imports, barrel re-exports, `this` / `self`, JSX components                                         | Done    |
 | Incremental indexing: only changed files are re-parsed; every query refreshes the index first                                                            | Done    |
 | `atlas context` / `impact` / `path` / `search` / `stats` / `export`, each with `--json`                                                                  | Done    |
+| `atlas diff`: what the changes since a commit or branch touch, what depends on that, which tests to run and which changed code no test depends on        | Done    |
 | `atlas mermaid`: file overview or the neighbourhood of one node                                                                                          | Done    |
 | `atlas view`: the graph as one HTML page to explore in a browser, with no server                                                                       | Done    |
-| `atlas mcp`: MCP server (stdio) with six tools; `atlas init` registers it with Claude Code, VS Code, Cursor, Devin (Windsurf) or JetBrains               | Done    |
+| `atlas mcp`: MCP server (stdio) with seven tools; `atlas init` registers it with Claude Code, VS Code, Cursor, Devin (Windsurf) or JetBrains               | Done    |
 | Local SQLite index (built-in `node:sqlite`, nothing to compile)                                                                                          | Done    |
 | Published npm package (`repo-atlas-cli`)                                                                                                                 | Done    |
 | Paid plans: hosted indexing of private repositories, shared team graph, CI integration                                                                   | Planned |
@@ -167,6 +168,7 @@ Every command accepts `-C <dir>` (work on another repository), `--json` (machine
 | list every table (or env key)                 | `atlas search "" --kind table`                                               |
 | get a briefing before editing something       | `atlas context <target>`                                                     |
 | see what a change can break                   | `atlas impact <target> [--depth n]`                                          |
+| see what my edits (or my branch) affect       | `atlas diff [base] [--depth n]`                                              |
 | understand how two things are connected       | `atlas path <from> <to>`                                                     |
 | draw the file-level overview                  | `atlas mermaid [--max n] [-o graph.mmd]`                                     |
 | draw the surroundings of one node             | `atlas mermaid --focus <target> [--depth n]`                                 |
@@ -189,6 +191,40 @@ When a name matches more than one node, the command prints the candidates and ex
 ### Reading `impact`
 
 Each line ends with the reason the node is listed: `[calls X]`, `[imports X]`, `[reads_table X]`, `[documents X]`. `[contains X]` marks the file that holds an affected function. Docs that mention an affected node are listed so you can update them, and are not followed further.
+
+### What your changes affect
+
+`atlas diff` reads the changed lines from git and looks them up in the graph. With no argument it covers what is not committed yet (edits, staged or not, and new files); with a branch, tag or commit it covers everything since the current branch left it, so `atlas diff main` is the whole pull request, whatever has landed on `main` since.
+
+```text
+$ atlas diff
+Changes since the last commit: 3 files
+
+changed (3)
+  src/db/schema.sql  (modified)
+    table:users
+  src/users/repo.ts  (modified)
+    sym:src/users/repo.ts#findUser  line 3
+  test/repo.test.ts  (untracked)
+
+affected (13)
+  direct (10)
+    file:docs/architecture.md  [documents table:users]
+    file:scripts/report.py  [reads_table table:users]
+    sym:src/api/handler.ts#handleOrder  [calls sym:src/users/repo.ts#findUser]
+    ...
+
+tests to run (1)
+  file:test/repo.test.ts
+
+docs to check (1)
+  file:docs/architecture.md
+```
+
+- A changed line counts against the innermost function, method or class around it, so the callers of the other functions in the file are not listed. A line outside all of them (an import, top-level code, something deleted between two functions) counts against the file, and then the files that import it are listed. In a `.sql` file a table definition runs to the next one.
+- Added or edited lines that are blank or hold only a comment are left out, so writing comments affects nothing. A line counts as a comment when it starts with the language's line comment (`//`, `#`, `--`) or lies in a block comment that began at the start of a line; anything less clear counts as code, as does a Python docstring. Lines that were only removed cannot be read this way, so removing a comment counts as a change. The index is always refreshed first, whatever `--no-refresh` says, because the line numbers come from the working tree.
+- A deleted or renamed file is no longer in the graph. The imports that now lead nowhere and name it are listed: a relative path (`../db/client.js`) has to lead to the file that is gone, any other form (`jobs.utils`, `crate::outbox`) is matched by name alone and can be an import that was already broken. A Python `from package import gone` that still finds the package is not caught.
+- A test file is one in a folder such as `test/`, `tests/`, `__tests__/`, `spec/` or `e2e/`, or named like `a.test.ts`, `a_test.go`, `test_a.py`, `ATest.java` or `a_spec.rb`. "Changed code no test depends on" lists a changed function when no test file reaches it through imports and calls, even indirectly; a test file that imports a file counts for every function in it. It rests on the same call edges as everything else, so a function only reached through an interface or other dynamic dispatch can be listed although a test runs it. Tests written inside the source file (Rust's `#[cfg(test)]` modules) are not told apart from the code.
 
 ### Develop this repository
 
@@ -216,7 +252,7 @@ atlas init --client cursor    # or: vscode, devin (also as windsurf), jetbrains
 | Devin Local (Windsurf) | `devin`, `windsurf` | writes `.devin/mcp_config.json`                                         | open **Customize > MCPs** and refresh                                                        |
 | JetBrains AI Assistant | `jetbrains`         | prints the entry; JetBrains keeps no file for it in the repository      | paste it under **Settings > Tools > AI Assistant > Model Context Protocol (MCP) > Add**      |
 
-Each file is the one that product's documentation names for a repository, and it is written in the folder `atlas` works on (the repository root, or `-C`); `atlas init` does not look for settings anywhere else. A file that is not valid JSON is left as it is and reported. Windsurf's documentation now leads to Devin Local, so `windsurf` writes the Devin file. What has been run end to end: Claude Code, and Cursor through its command-line agent (3.26, `cursor-agent mcp list-tools repo-atlas` lists the six tools once the server is approved). VS Code was checked against an installed copy (1.109): that version reads `.vscode/mcp.json` and nothing at the repository root, which is why `vscode` writes there; according to VS Code's documentation, newer versions can also read the `.mcp.json` that plain `atlas init` writes, when the setting `chat.mcp.workspaceRootConfig.enabled` is on; that was not checked here. A `.vscode/mcp.json` with comments in it is not valid JSON for `atlas init`, which then leaves it alone and says so. The server was not started inside VS Code, and Devin and JetBrains follow their documentation as of November 2026 without having been run.
+Each file is the one that product's documentation names for a repository, and it is written in the folder `atlas` works on (the repository root, or `-C`); `atlas init` does not look for settings anywhere else. A file that is not valid JSON is left as it is and reported. Windsurf's documentation now leads to Devin Local, so `windsurf` writes the Devin file. What has been run end to end: Claude Code, and Cursor through its command-line agent (3.26, `cursor-agent mcp list-tools repo-atlas` lists the tools once the server is approved). VS Code was checked against an installed copy (1.109): that version reads `.vscode/mcp.json` and nothing at the repository root, which is why `vscode` writes there; according to VS Code's documentation, newer versions can also read the `.mcp.json` that plain `atlas init` writes, when the setting `chat.mcp.workspaceRootConfig.enabled` is on; that was not checked here. A `.vscode/mcp.json` with comments in it is not valid JSON for `atlas init`, which then leaves it alone and says so. The server was not started inside VS Code, and Devin and JetBrains follow their documentation as of November 2026 without having been run.
 
 To add the server by hand, this is the entry (`"type": "stdio"` is what VS Code and Cursor ask for; the others do not need it, and in `.vscode/mcp.json` the outer name is `servers`, not `mcpServers`):
 
@@ -235,6 +271,7 @@ The `atlas` command must be on the agent's `PATH`; when running from source, rep
 | `atlas_search`  | which nodes have this name?                                                |
 | `atlas_context` | what should I know before editing this?                                    |
 | `atlas_impact`  | what depends on this, and which docs mention it?                           |
+| `atlas_diff`    | what do the uncommitted changes (or the branch) affect, and which tests cover them? |
 | `atlas_path`    | how are these two connected?                                               |
 | `atlas_mermaid` | draw this part of the graph                                                |
 | `atlas_stats`   | how big is the graph, which files are hubs, which imports did not resolve? |
@@ -298,7 +335,7 @@ repo-atlas/
 │   ├── extract/   # one file -> facts (tree-sitter, SQL, env, Markdown)
 │   ├── indexer/   # file listing, import aliases, linking facts into a graph, incremental index
 │   ├── store/     # SQLite (the only module that knows SQL)
-│   ├── query/     # search, context, impact, path, mermaid, stats (pure, over the in-memory graph)
+│   ├── query/     # search, context, impact, changes, path, mermaid, stats (pure, over the in-memory graph)
 │   ├── app/       # Atlas: what the CLI and the MCP server both call
 │   ├── mcp/       # MCP server
 │   └── cli/       # the `atlas` command
@@ -335,6 +372,7 @@ TypeScript (ESM) on Node.js 22+ · [web-tree-sitter](https://github.com/tree-sit
     - [x] Ruby
   - [x] local HTML viewer (`atlas view`)
   - [x] setup for the agents inside editors (`atlas init --client`): VS Code, Cursor, Devin (Windsurf), JetBrains
+  - [x] impact of a change set read from git (`atlas diff`)
 - [ ] **Phase 6**: paid plans: hosted private-repository indexing, shared team graph, CI integration (planned)
 
 ## Contributing

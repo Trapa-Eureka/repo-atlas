@@ -6,7 +6,7 @@ import { Atlas, findRoot } from "../app/atlas.js";
 import { NODE_KINDS, type NodeKind } from "../graph/types.js";
 import { serveMcp } from "../mcp/server.js";
 import { TargetError } from "../query/resolve.js";
-import { nodeLine, renderContext, renderImpact, renderPath, renderSearch, renderStats, renderSummary } from "./render.js";
+import { nodeLine, renderChanges, renderContext, renderImpact, renderPath, renderSearch, renderStats, renderSummary } from "./render.js";
 
 
 interface GlobalOptions {
@@ -163,6 +163,17 @@ export function buildProgram(): Command {
       withAtlas((atlas) => {
         const result = atlas.impact(target, options.depth);
         output(result, () => renderImpact(result));
+      }),
+    );
+
+  program
+    .command("diff [base]")
+    .description("what the changes since <base> touch and what depends on that: commits since the branch left it, uncommitted edits and new files (default: the last commit)")
+    .option("-d, --depth <steps>", "stop after this many steps", positiveInteger)
+    .action((base: string | undefined, options: { depth?: number }) =>
+      withAtlas(async (atlas) => {
+        const result = await atlas.diff(base, options.depth);
+        output(result, () => renderChanges(result));
       }),
     );
 

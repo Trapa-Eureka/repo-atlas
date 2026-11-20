@@ -280,7 +280,7 @@ describe("MCP server", () => {
     await client.connect(clientSide);
 
     const tools = await client.listTools();
-    expect(tools.tools.map((tool) => tool.name).sort()).toEqual(["atlas_context", "atlas_impact", "atlas_mermaid", "atlas_path", "atlas_search", "atlas_stats"]);
+    expect(tools.tools.map((tool) => tool.name).sort()).toEqual(["atlas_context", "atlas_diff", "atlas_impact", "atlas_mermaid", "atlas_path", "atlas_search", "atlas_stats"]);
 
     const call = async (name: string, args: Record<string, unknown>) => {
       const result = (await client.callTool({ name, arguments: args })) as { content: { text: string }[]; isError?: boolean };
@@ -293,6 +293,10 @@ describe("MCP server", () => {
     writeFileSync(join(root, "src/new.ts"), `export function freshlyAdded() {}\n`);
     const search = await call("atlas_search", { query: "freshlyAdded" });
     expect(JSON.parse(search.text)[0].id).toBe("sym:src/new.ts#freshlyAdded");
+
+    // The copy of the sample is not a git repository: the tool says so instead of failing the server.
+    const diff = await call("atlas_diff", {});
+    expect(diff).toMatchObject({ isError: true, text: expect.stringContaining("not inside a git repository") });
 
     const unknown = await call("atlas_context", { target: "no-such-thing-anywhere" });
     expect(unknown.isError).toBe(true);

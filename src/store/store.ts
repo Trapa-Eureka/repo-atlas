@@ -92,6 +92,12 @@ export class Store {
     return rows.map((row) => JSON.parse(row.facts) as FileFacts);
   }
 
+  /** The stored facts of one file, or null when the index does not hold it. */
+  factsOf(path: string): FileFacts | null {
+    const row = this.db.prepare("SELECT facts FROM files WHERE path = ?").get(path) as { facts: string } | undefined;
+    return row ? (JSON.parse(row.facts) as FileFacts) : null;
+  }
+
   replaceGraph(nodes: GraphNode[], edges: GraphEdge[]): void {
     this.db.exec("DELETE FROM edges; DELETE FROM nodes;");
     const insertNode = this.db.prepare("INSERT INTO nodes (id, kind, name, file, line, detail) VALUES (?, ?, ?, ?, ?, ?)");
