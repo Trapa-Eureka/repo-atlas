@@ -65,6 +65,8 @@ export function report({ repo, language, atlas, rows, notCounted, notSymbol, use
   console.log("\nfound calls, by form:");
   for (const [form, n] of count(found, (call) => call.form)) console.log(`  ${String(n).padStart(6)}  ${form}`);
 
+  // One line for scripts/bench.mjs to read.
+  process.stdout.write(`JSON ${JSON.stringify({ repo, files: atlas.files.length, imports: { truth: imports.size, found: importsFound }, calls: { truth: all.length, found: found.length, withNode: nameable.length, foundWithNode: nameableFound } })}\n`);
   if (!missArg) return;
   const sample = missed.filter((call) => !only || reasonOf(call).startsWith(only));
   let seed = 42;

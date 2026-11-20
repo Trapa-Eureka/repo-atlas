@@ -14,6 +14,9 @@
 *.sqlite
 *.sqlite3
 
+# Public repositories fetched by `pnpm bench` to measure missed edges on.
+/.bench/
+
 # ---------- [2] Private notes ----------
 # Planning notes, including the paid plans that are not built. Kept on the author's machine only.
 /docs/

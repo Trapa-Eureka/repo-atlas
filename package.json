@@ -49,6 +49,7 @@
     "test:hooks": "node --test .claude/hooks/*.test.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm test:hooks",
     "atlas": "node dist/cli/main.js",
+    "bench": "pnpm build && node scripts/bench.mjs",
     "screenshots": "pnpm build && node scripts/screenshots.mjs && node scripts/social-preview.mjs"
   },
   "dependencies": {

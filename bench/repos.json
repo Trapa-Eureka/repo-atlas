@@ -1,0 +1,17 @@
+[
+  { "name": "express", "url": "https://github.com/expressjs/express.git", "commit": "43fca52d28a422c8be48fd489cbd4f2d6152bab6", "measure": "typescript" },
+  { "name": "got", "url": "https://github.com/sindresorhus/got.git", "commit": "6b5aafc1cd538998728be6f45c65b0f80bae01b2", "measure": "typescript" },
+  { "name": "hono", "url": "https://github.com/honojs/hono.git", "commit": "75ff8e3ea18485589816881c6278bc9783e56602", "measure": "typescript" },
+  { "name": "swr", "url": "https://github.com/vercel/swr.git", "commit": "8148ef012fd5b317d1e8ec2da4b2ca0673f63c0f", "measure": "typescript" },
+  { "name": "trpc", "url": "https://github.com/trpc/trpc.git", "commit": "596d03d93295f8b4876909cfce86f94a1e6afe51", "measure": "typescript" },
+  { "name": "umami", "url": "https://github.com/umami-software/umami.git", "commit": "aad2c4cedd5c0b3bc4d361843830a0bb47cf79c4", "measure": "typescript" },
+  { "name": "full-stack-fastapi-template", "url": "https://github.com/fastapi/full-stack-fastapi-template.git", "commit": "77e550a73bb49dd2967622c5ed11bf7a49603c93", "measure": "typescript" },
+  { "name": "commons-lang", "url": "https://github.com/apache/commons-lang.git", "commit": "5a1545b5f9a095f9a02725dcd0316800f237531e", "measure": "java" },
+  { "name": "gson", "url": "https://github.com/google/gson.git", "commit": "7fc4d18d58f39299bcb52fc98ae51b1b7655b9d4", "measure": "java" },
+  { "name": "jsoup", "url": "https://github.com/jhy/jsoup.git", "commit": "d90d57521d931db7bf7ee464a4c0a1a9293db088", "measure": "java" },
+  { "name": "spring-petclinic", "url": "https://github.com/spring-projects/spring-petclinic.git", "commit": "500158f732419217507c7656904b8e6aa1bcc0d6", "measure": "java" },
+  { "name": "gin", "url": "https://github.com/gin-gonic/gin.git", "commit": "0f09c3a9b4626d9fe9979cf4d0521d6ae32ab646", "measure": "go" },
+  { "name": "cobra", "url": "https://github.com/spf13/cobra.git", "commit": "adbc8813901bba65827259daa8e22ff94ec1f30e", "measure": "go" },
+  { "name": "miniflux", "url": "https://github.com/miniflux/v2.git", "commit": "eea1ec706fcd40687032804d197bb67cb0d96ef4", "measure": "go" },
+  { "name": "pocketbase", "url": "https://github.com/pocketbase/pocketbase.git", "commit": "7f2773ec234b62d0b80ca47c508397cb3d0da3ea", "measure": "go" }
+]
