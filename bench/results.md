@@ -2,7 +2,7 @@
 
 repo-atlas 0.6.0. Written by `pnpm bench`; do not edit by hand.
 
-For each repository, at the commit in [`repos.json`](repos.json), every call and every cross-file use that a compiler resolves to a declaration inside the repository is looked up in the graph. A call counts as found when the graph has a `calls` edge from the calling file to that function, method or class. "Calls to symbols" leaves out the targets the graph never makes a symbol of by design (a function inside a function, a method of an object literal, an interface method in Go). Nothing in the repositories is installed, built or run, so a call the compiler cannot resolve without the dependencies is not in the count.
+For each repository, at the commit in [`repos.json`](repos.json), every call and every cross-file use that a compiler resolves to a declaration inside the repository is looked up in the graph. A call counts as found when the graph has a `calls` edge from the calling file to that function, method or class, and each pair of calling file and target counts once however often the call is written. "Calls to symbols" leaves out the targets the graph never makes a symbol of by design (a function inside a function, a method of an object literal, an interface method in Go). Nothing in the repositories is installed, built or run, so a call the compiler cannot resolve without the dependencies is not in the count.
 
 ## TypeScript / JavaScript
 
@@ -43,4 +43,16 @@ Against the Go type checker (go version go1.27.4 darwin/arm64).
 | [pocketbase](https://github.com/pocketbase/pocketbase) | `7f2773e` | 461 | 1,155 / 1,155 (100.0%) | 3,956 / 5,212 (75.9%) | 3,956 / 4,503 (87.9%) |
 | **All** | | 1,037 | 2,332 / 2,332 (100.0%) | **8,681 / 10,394 (83.5%)** | 8,681 / 9,618 (90.3%) |
 
-Rust, Ruby and Python have no such measurement: a compiler's answer for them needs the dependencies built or a type checker installed. The README gives hand-read samples for Rust and Ruby.
+## Python
+
+Against pyright (pyright 1.1.414, calls listed by Python 3.9.6).
+
+| Repository | Commit | Files | Imports | Calls | Calls to symbols |
+| --- | --- | ---: | ---: | ---: | ---: |
+| [flask](https://github.com/pallets/flask) | `49943b5` | 83 | 141 / 185 (76.2%) | 192 / 497 (38.6%) | 192 / 445 (43.1%) |
+| [httpx](https://github.com/encode/httpx) | `7cff5f7` | 60 | 123 / 123 (100.0%) | 283 / 595 (47.6%) | 283 / 555 (51.0%) |
+| [datasette](https://github.com/simonw/datasette) | `c397483` | 189 | 652 / 652 (100.0%) | 1,687 / 2,082 (81.0%) | 1,687 / 1,894 (89.1%) |
+| [full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) | `77e550a` | 43 | 85 / 85 (100.0%) | 91 / 91 (100.0%) | 91 / 91 (100.0%) |
+| **All** | | 375 | 1,001 / 1,045 (95.8%) | **2,253 / 3,265 (69.0%)** | 2,253 / 2,985 (75.5%) |
+
+Rust and Ruby have no such measurement: a compiler's answer for Rust needs the dependencies built, and Ruby has no checker that resolves calls without type signatures. The README gives hand-read samples for both.

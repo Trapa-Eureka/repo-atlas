@@ -33,6 +33,9 @@ importers:
       fast-check:
         specifier: ^4.10.3
         version: 4.10.3
+      pyright:
+        specifier: ^1.1.414
+        version: 1.1.414
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -940,6 +943,11 @@ packages:
 
   pure-rand@8.4.2:
     resolution: {integrity: sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==}
+
+  pyright@1.1.414:
+    resolution: {integrity: sha512-FPZZb51jepDX4eP7TEYDeNFtmE3WgwkkEcJpvH3/QmUSsj0EAy3LXu+xB4T/FWDejtsXlCfFr/rbWFjwuwuXww==}
+    engines: {node: '>=14.0.0'}
+    hasBin: true
 
   qified@0.10.1:
     resolution: {integrity: sha512-+Owyggi9IxT1ePKGafcI87ubSmxol6smwJ+RAHDQlx9+9cPwFWDiKFFCPuWhr9ignlGpZ9vDQLw67N4dcTVFEA==}
@@ -2053,6 +2061,10 @@ snapshots:
   punycode@2.3.1: {}
 
   pure-rand@8.4.2: {}
+
+  pyright@1.1.414:
+    optionalDependencies:
+      fsevents: 2.3.3
 
   qified@0.10.1:
     dependencies:

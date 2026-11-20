@@ -1,13 +1,13 @@
 // Measures, on a fixed set of public repositories at fixed commits, how many of the calls and
 // cross-file uses a compiler resolves are in atlas's graph, and writes the table to bench/results.md.
 //
-//   pnpm bench [--dir <folder>] [--only typescript|java|go]
+//   pnpm bench [--dir <folder>] [--only typescript|java|go|python]
 //
 // Each repository in bench/repos.json is fetched once into <folder> (default: .bench, which git
 // ignores) at the commit written there; a folder that is already there is used if it is at that
 // commit, and refused if it is not. Nothing in the repositories is built or run. The TypeScript
-// compiler comes with this package; Java needs a JDK (17 or later) and Go needs `go`, and a
-// language whose tool is missing is skipped and said to be.
+// compiler and pyright come with this package; Java needs a JDK (17 or later), Go needs `go` and
+// Python needs `python3` to list the calls. A language whose tool is missing is skipped and said to be.
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -24,6 +24,7 @@ const MEASURES = {
   typescript: { title: "TypeScript / JavaScript", truth: "the TypeScript compiler", script: "recall.mjs", uses: "imports", tool: null },
   java: { title: "Java", truth: "javac", script: "recall-java.mjs", uses: "class uses", tool: ["java", "-version"] },
   go: { title: "Go", truth: "the Go type checker", script: "recall-go.mjs", uses: "package uses", tool: ["go", "version"] },
+  python: { title: "Python", truth: "pyright", script: "recall-python.mjs", uses: "imports", tool: ["node", join(root, "node_modules/pyright/index.js"), "--version"] },
 };
 
 const run = (command, commandArgs, options = {}) => execFileSync(command, commandArgs, { encoding: "utf8", maxBuffer: 1024 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"], ...options });
@@ -67,10 +68,20 @@ for (const repo of repos) {
   const path = checkout(repo);
   process.stderr.write(`measuring ${repo.name}\n`);
   run("node", [join(root, "dist/cli/main.js"), "-C", path, "index"]);
-  const out = run("node", [join(here, MEASURES[repo.measure].script), path]);
+  let out;
+  try {
+    out = run("node", [join(here, MEASURES[repo.measure].script), path]);
+  } catch (error) {
+    // The Python measurement needs an interpreter to list the calls, which only the script itself can look for.
+    if (!/No Python that runs/.test(String(error.stderr))) throw error;
+    skipped.push(`${MEASURES[repo.measure].title}: no \`python3\` that runs was found`);
+    versions[repo.measure] = null;
+    continue;
+  }
   const line = out.split("\n").find((text) => text.startsWith("JSON "));
   if (!line) throw new Error(`${MEASURES[repo.measure].script} printed no result for ${repo.name}`);
   const result = JSON.parse(line.slice(5));
+  if (result.lister && !versions[repo.measure].includes(result.lister)) versions[repo.measure] += `, calls listed by ${result.lister}`;
   rows.push({ ...repo, files: result.files ?? result.scriptFiles, uses: result.imports, calls: result.calls });
 }
 
@@ -82,12 +93,12 @@ const lines = [
   "",
   `repo-atlas ${version}. Written by \`pnpm bench\`; do not edit by hand.`,
   "",
-  "For each repository, at the commit in [`repos.json`](repos.json), every call and every cross-file use that a compiler resolves to a declaration inside the repository is looked up in the graph. A call counts as found when the graph has a `calls` edge from the calling file to that function, method or class. \"Calls to symbols\" leaves out the targets the graph never makes a symbol of by design (a function inside a function, a method of an object literal, an interface method in Go). Nothing in the repositories is installed, built or run, so a call the compiler cannot resolve without the dependencies is not in the count.",
+  "For each repository, at the commit in [`repos.json`](repos.json), every call and every cross-file use that a compiler resolves to a declaration inside the repository is looked up in the graph. A call counts as found when the graph has a `calls` edge from the calling file to that function, method or class, and each pair of calling file and target counts once however often the call is written. \"Calls to symbols\" leaves out the targets the graph never makes a symbol of by design (a function inside a function, a method of an object literal, an interface method in Go). Nothing in the repositories is installed, built or run, so a call the compiler cannot resolve without the dependencies is not in the count.",
   "",
 ];
 for (const [measure, { title, truth, uses }] of Object.entries(MEASURES)) {
   const mine = rows.filter((row) => row.measure === measure);
-  if (mine.length === 0) continue;
+  if (mine.length === 0 || versions[measure] === null) continue;
   const sum = (pick) => mine.reduce((total, row) => total + pick(row), 0);
   lines.push(`## ${title}`, "", `Against ${truth} (${versions[measure]}).`, "", `| Repository | Commit | Files | ${uses[0].toUpperCase()}${uses.slice(1)} | Calls | Calls to symbols |`, "| --- | --- | ---: | ---: | ---: | ---: |");
   for (const row of mine) {
@@ -96,7 +107,7 @@ for (const [measure, { title, truth, uses }] of Object.entries(MEASURES)) {
   lines.push(`| **All** | | ${sum((row) => row.files).toLocaleString("en-US")} | ${cell(sum((row) => row.uses.found), sum((row) => row.uses.truth))} | **${cell(sum((row) => row.calls.found), sum((row) => row.calls.truth))}** | ${cell(sum((row) => row.calls.foundWithNode), sum((row) => row.calls.withNode))} |`, "");
 }
 if (skipped.length > 0) lines.push("Not measured in this run:", "", ...skipped.map((text) => `- ${text}`), "");
-lines.push("Rust, Ruby and Python have no such measurement: a compiler's answer for them needs the dependencies built or a type checker installed. The README gives hand-read samples for Rust and Ruby.", "");
+lines.push("Rust and Ruby have no such measurement: a compiler's answer for Rust needs the dependencies built, and Ruby has no checker that resolves calls without type signatures. The README gives hand-read samples for both.", "");
 
 const text = lines.join("\n");
 if (!only) writeFileSync(join(root, "bench/results.md"), text);

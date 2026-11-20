@@ -26,7 +26,7 @@ export function atlasGraph(repo, extension) {
  * file, `C from to name shape form line around` for a call. `notSymbol` names the shapes atlas
  * never makes a symbol of; `uses` is what the `I` rows are called in the output.
  */
-export function report({ repo, language, atlas, rows, notCounted, notSymbol, uses, missArg, only }) {
+export function report({ repo, language, atlas, rows, notCounted, notSymbol, uses, missArg, only, lister }) {
   const indexed = new Set(atlas.files);
   const calls = new Map();
   const imports = new Set();
@@ -66,7 +66,7 @@ export function report({ repo, language, atlas, rows, notCounted, notSymbol, use
   for (const [form, n] of count(found, (call) => call.form)) console.log(`  ${String(n).padStart(6)}  ${form}`);
 
   // One line for scripts/bench.mjs to read.
-  process.stdout.write(`JSON ${JSON.stringify({ repo, files: atlas.files.length, imports: { truth: imports.size, found: importsFound }, calls: { truth: all.length, found: found.length, withNode: nameable.length, foundWithNode: nameableFound } })}\n`);
+  process.stdout.write(`JSON ${JSON.stringify({ repo, lister, files: atlas.files.length, imports: { truth: imports.size, found: importsFound }, calls: { truth: all.length, found: found.length, withNode: nameable.length, foundWithNode: nameableFound } })}\n`);
   if (!missArg) return;
   const sample = missed.filter((call) => !only || reasonOf(call).startsWith(only));
   let seed = 42;
